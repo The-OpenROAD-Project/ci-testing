@@ -72,14 +72,27 @@ on a fresh entry without PR2.
 - Did PR3 get a new queue branch:
 - Eviction latency:
 
-### 4. Semantic conflict — _pending_
+### 4. Semantic conflict — **PASS** (2026-08-05)
 
-`MAX_ITEMS=2`, one baseline item; PR A and PR B each add one item. Each is at 2
-items alone (pass); the entry containing both is at 3 (fail). No textual
-conflict — separate files.
+`MAX_ITEMS=2`, one baseline item. PR #4 `alpha` and PR #5 `bravo`, each adding
+one file, enqueued back to back.
 
-- Which PR failed:
-- Would PR-level CI alone have caught it: _expected no — this is the value prop_
+- **PR #4 `alpha`**: green as a PR, queue entry green, merged (`ab47802`).
+- **PR #5 `bravo`**: PR-level `ci` **SUCCESS** — its branch was cut before
+  `alpha` landed, so it saw 2 items. Queue entry
+  `gh-readonly-queue/main/pr-5-ab47802` (base = `main` *with* `alpha`) saw 3
+  items → `CI` **failure** → `removed_from_merge_queue` 17:59:02, not merged,
+  auto-merge cleared.
+- **Would PR-level CI have caught it? No.** Git saw no conflict either — the two
+  PRs touch different files. Only the queue caught it. This is the value prop,
+  demonstrated end to end.
+- Aftermath, worth knowing: `bravo` is now permanently unmergeable (`main` is at
+  the 2-item limit), so its author has to rebase and deal with it. The queue
+  converts a latent broken-`main` into a stuck PR — which is the trade.
+- Note these two did **not** co-batch: `pr-5`'s entry was based on `main` *after*
+  `alpha` merged, i.e. the queue serialized them rather than speculating. With
+  `min_entries_to_merge: 1` and a 60s check, `alpha` merged before `bravo` was
+  enqueued. Scenario 2 needs `SLEEP_SECONDS=180` to force real overlap.
 
 ### 5. Jenkins gating / timeout — _pending_
 
@@ -90,13 +103,57 @@ Expected: the queue waits, then evicts at `check_response_timeout_minutes` (15).
 - Observed wait:
 - Queue message:
 
-### 6. Jenkins-only probe — _pending_
+### 6. Jenkins discovery + status posting — **PARTIAL** (2026-08-05)
 
-`scripts/fake-queue-branch.sh` — no real queue involved.
+The synthetic probe turned out to be unnecessary: the real queue runs already
+answered the discovery question. Job `DevOps/ci-testing-Public`.
 
-- Was a push to `gh-readonly-queue/*` accepted, or did it fall back to `mq-sim/*`:
-- Did Jenkins index the branch, and how fast (webhook vs 1-min scan):
-- Did `github-token` post the status (`status POST 201`):
+**Works — the big unknown is settled:** Jenkins discovered and built **every**
+`gh-readonly-queue/main/pr-N-<base>` ref with no special configuration —
+`pr-2`, `pr-3`, `pr-4` green, `pr-5` red (correctly failing the 3-item count, so
+`ci/check.sh` genuinely ran on the queue tree). Indexing kept up with refs that
+exist for ~2 minutes.
+
+**Broken — no commit status reached GitHub.** All four queue SHAs and PR #5's
+head report `total_count: 0` statuses. Root cause:
+
+- `openroad-ci` (the identity behind the `github-token` credential) has **admin
+  on `OpenROAD` but is not a collaborator on `ci-testing`**, and `ci-testing` has
+  no teams attached at all.
+- The repo is public, so Jenkins could *clone* without credentials; only the
+  *write* (statuses API) failed.
+- The original `postStatus` used `curl -sS` with no status-code check, so a
+  403/404 printed nothing and the build stayed **green**. Fixed: it now prints
+  the HTTP code and response body and fails the build.
+
+This is the exact failure mode that would hang a production merge queue for the
+full `check_response_timeout_minutes` while Jenkins reports success — a silent
+non-posting status is worse than a red build. Any real rollout needs the
+loud-failure version.
+
+**Second gap:** the job shows **Pull Requests (0)** with PR #5 open, so
+"Discover pull requests from origin" is not in effect. Without PR jobs,
+`jenkins/ci` never lands on a PR head, and making it required would block every
+PR from being queued at all — the exact deadlock described in
+`docs/jenkins-setup.md`. Must be fixed before step 6 of `docs/github-setup.md`.
+
+**Third, as predicted:** the branch list already shows the four queue branches
+struck through (orphaned) after two runs. Confirms the orphaned-item strategy is
+mandatory, not hygiene.
+
+Fixes required, in order:
+
+```bash
+# 1. let the CI identity write statuses on this repo
+gh api -X PUT repos/The-OpenROAD-Project/ci-testing/collaborators/openroad-ci \
+  -f permission=push
+```
+
+2. Job → Configure → Behaviours → add **Discover pull requests from origin**
+   (*Merging the pull request with the current target branch revision*), re-scan,
+   confirm the Pull Requests tab is non-empty.
+3. Merge the loud-failure `Jenkinsfile`, re-run, confirm
+   `status POST jenkins/ci=success on <sha> -> HTTP 201`.
 
 ## Route A vs route B
 

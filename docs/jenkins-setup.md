@@ -93,6 +93,27 @@ required-status-checks list to both PR gating and merge-group validation, so:
 Route A posts `jenkins/ci` from the pipeline on every job type, which satisfies
 both. Route B achieves the same with an unsuffixed plugin context instead.
 
+## Verified on 2026-08-05 (job `DevOps/ci-testing-Public`)
+
+- **Queue-ref discovery needs nothing special.** Jenkins picked up and built
+  every `gh-readonly-queue/main/pr-N-<base>` ref, including ones that existed for
+  only ~2 minutes. The `gh-readonly-queue/main/**` name filter is optional, not
+  load-bearing.
+- **The CI identity needs write access on the repo.** `openroad-ci` had admin on
+  `OpenROAD` but was not a collaborator on this repo, and the repo had no teams —
+  so Jenkins cloned fine (public repo, no creds needed) and every statuses-API
+  POST was rejected. Builds stayed green with zero statuses on GitHub:
+  ```bash
+  gh api -X PUT repos/The-OpenROAD-Project/ci-testing/collaborators/openroad-ci \
+    -f permission=push
+  ```
+- **PR discovery is not on by default here.** The job showed *Pull Requests (0)*
+  with an open PR. Add **Discover pull requests from origin** or `jenkins/ci`
+  never reaches a PR head, and requiring it blocks every PR from entering the
+  queue.
+- **Orphaned jobs pile up immediately** — four struck-through queue branches
+  after two scenarios. The orphaned-item strategy in step 6 is mandatory.
+
 ## Known interactions (already verified against the shared library)
 
 - `gh-readonly-queue/...` does not match the `PR-`/`pull/` special case in
