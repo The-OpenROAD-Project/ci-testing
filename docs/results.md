@@ -192,12 +192,12 @@ It burns a queue cycle and lies to the author.
 Also confirmed as predicted: five orphaned (struck-through) queue-branch jobs
 after three scenarios.
 
-### 7. pr-merge gate blocks entry to the queue — _pending_
+### 7. pr-merge gate blocks entry to the queue — **PASS** (2026-08-05, PR #11)
 
 Purpose: prove the PR-level gate is a **merge-with-target** build, and that a red
 one keeps the PR out of the queue.
 
-Sequence (`main` at 2 items, `MAX_ITEMS=8`):
+Sequence as run (`main` at 2 items, `MAX_ITEMS=8`):
 
 1. `scripts/mk-pr.sh foxtrot MAX_ITEMS=3` → 3 items, limit 3, green both alone and
    merged.
@@ -213,10 +213,71 @@ Sequence (`main` at 2 items, `MAX_ITEMS=8`):
 5. Unblock (merge `main` in, or raise `MAX_ITEMS`) → enqueues and merges, proving
    the gate releases as well as blocks.
 
-- 7a stale-green enqueue accepted:
-- 7b: `added_to_merge_queue` present?
-- 7b: `ci/check.sh` reported `merge build : yes` and item count 4?
-- 5: released and merged?
+**Result — the gate holds in both directions.**
+
+**7a, stale green (observed, not merely reasoned about).** With `main` at 3 items
+after golf (#12) landed, foxtrot (#11) still showed `ci` **pass** + `Public CI`
+**pass**, while the union of its tree with `main` was 4 items against its own
+`MAX_ITEMS=3`:
+
+```
+main items    : alpha baseline golf
+foxtrot items : alpha baseline foxtrot
+merged union  : alpha baseline foxtrot golf   -> 4 vs MAX_ITEMS=3
+```
+
+Nothing re-ran those checks when the base moved. Clicking Merge when ready here
+would have enqueued the PR on that stale green, leaving the **queue entry** as
+the only thing standing between it and a broken `main`.
+
+**7b, fresh red — the gate.** An empty commit (`629fcf2`) forced both CIs onto
+the current merge ref. `ci/check.sh` from the Actions log:
+
+```
+parents     : 2 (79f934cb… 629fcf2…)
+merge build : yes  <- yes = testing the merged tree, not the branch alone
+item count: 4 (max 3)
+FAIL: 4 items exceeds MAX_ITEMS=3
+```
+
+The count of 4 is unreachable from foxtrot's branch alone (3 items), so the
+gating build is provably the merged tree. Both checks went red
+(`ci=FAILURE Public CI=ERROR`). Then `gh pr merge 11 --merge --auto`:
+
+| assertion | result |
+|---|---|
+| `auto_merge_enabled` in timeline | present, 21:46:33 |
+| `added_to_merge_queue` | **absent** |
+| `gh-readonly-queue/*` refs | none |
+| `mergeStateStatus` | `BLOCKED` |
+
+**Step 5, release.** Raising foxtrot's `MAX_ITEMS` to 4 (`b038cde`) turned both
+checks green; the still-armed auto-merge fired on its own, entry
+`gh-readonly-queue/main/pr-11-79f934cb` (head `66f8f9ee`) appeared, and it merged.
+So the gate releases as well as blocks — it is not simply a stuck PR.
+
+Latency, from the timeline: Merge when ready was clicked at **21:46:33** with both
+checks red, and the PR was held outside the queue for **20 minutes** — entering at
+**22:06:35**, two seconds after the last required check turned green
+(`Public CI` at 22:06:33). The hold is not a poll interval or a retry; it is the
+merge request sitting armed until the gate opens.
+
+**What this does and does not give you.** GitHub's docs are explicit that *"You
+can click Merge when ready before all requirements pass"* — the button cannot be
+disabled. The enforceable gate is **entry into the queue**, and it is enforced by
+the ordinary required-status-checks list. Since both CI systems build PRs as
+merged-with-target already (Actions checks out `refs/pull/N/merge`; the Jenkins
+PR job uses *merging the PR with the current target branch revision*), the
+existing `ci` + `Public CI` requirement **is** the pr-merge gate. No extra check
+is needed — and a new required check that ran only on `pull_request` would stall
+every merge group for `check_response_timeout_minutes`, so adding one would be
+actively harmful.
+
+**Trap this exposed.** A `ci/config.env` override used to shape a scenario
+**lands on `main`** with the PR. After #11, `main` carries `MAX_ITEMS=4` with
+exactly 4 items, so the next item PR would fail merged-with-target for reasons
+unrelated to the test. Raise the limit on `main` before scenarios 2 and 3, and
+treat per-branch overrides as temporary only for PRs that get closed, not merged.
 
 ### 8. What a merge-commit queue lands — **PASS** (2026-08-05, PR #9)
 
@@ -248,6 +309,10 @@ Sequence (`main` at 2 items, `MAX_ITEMS=8`):
   |/
   * 65aa7bf 5912dad  ci: raise MAX_ITEMS to 8 (#8)   <- squash-era, single parent
   ```
+- **Replicated on PR #12** (`golf`): merge commit `79f934c`, parents
+  `f026c73` (`main`) + `3cfbcdc` (PR head), `main` again fast-forwarded to the
+  queue head, tree identical. Three for three, so the shape is stable rather than
+  a one-off.
 - Speculative stacking with `max_entries_to_build: 5` is still unobserved — needs
   scenario 2 (three overlapping PRs).
 

@@ -35,9 +35,11 @@ for kv in "$@"; do
     echo "no such knob in ci/config.env: ${key}" >&2
     exit 1
   fi
-  # BSD and GNU sed disagree on -i, so rewrite via a temp file.
+  # BSD and GNU sed disagree on -i, so rewrite via a temp file. -f because `mv`
+  # is commonly aliased to `mv -i`, which would prompt and silently no-op the
+  # override if this ever runs somewhere aliases are expanded.
   sed "s|^${key}=.*|${key}=${val}|" ci/config.env > ci/config.env.tmp
-  mv ci/config.env.tmp ci/config.env
+  mv -f ci/config.env.tmp ci/config.env
   echo "set ${key}=${val}"
 done
 git add ci/config.env

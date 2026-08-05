@@ -74,7 +74,11 @@ if [ "${1:-loop}" = "once" ]; then
   exit 0
 fi
 
+# `|| true`: the watcher is meant to run unattended across a whole scenario, and
+# a single transient failure (a `git ls-remote` or `gh` hiccup) must not kill it
+# under `set -e`. Losing the loop means losing queue-head capture, and those refs
+# are unrecoverable once GitHub deletes them.
 while true; do
-  render
+  render || echo "  (render failed, continuing)"
   sleep "$interval"
 done
