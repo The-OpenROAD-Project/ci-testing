@@ -1,0 +1,27 @@
+name: CI
+
+# `merge_group` is mandatory. Without it, a check required by the merge queue
+# never runs for a queue entry and the queue stalls until
+# check_response_timeout_minutes expires.
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+# Collapse redundant PR runs, but never cancel a merge_group run: a cancelled
+# required check reads as a failure to the queue and evicts the PR.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./ci/check.sh
