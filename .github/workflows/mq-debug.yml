@@ -1,0 +1,37 @@
+name: MQ debug
+
+# Observability only — deliberately NOT a required check. Records what the
+# merge queue actually built for each entry, which is the evidence for the
+# speculative-batching scenario.
+on:
+  merge_group:
+
+jobs:
+  dump:
+    name: mq-debug
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge group facts
+        env:
+          MG_REF: ${{ github.ref }}
+          MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          echo "ref      = $MG_REF"
+          echo "base_ref = $MG_BASE_REF"
+          echo "base_sha = $MG_BASE_SHA"
+          echo "head_ref = $MG_HEAD_REF"
+          echo "head_sha = $MG_HEAD_SHA"
+          echo "--- commits this entry stacks on top of base ---"
+          git --no-pager log --oneline "$MG_BASE_SHA..HEAD"
+
+      - name: Full event payload
+        env:
+          PAYLOAD: ${{ toJSON(github.event) }}
+        run: printf '%s\n' "$PAYLOAD" | jq .
