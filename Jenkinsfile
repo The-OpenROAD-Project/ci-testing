@@ -79,13 +79,26 @@ void postStatus(String repo, String sha, String context, String state, String de
     withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
         withEnv(["ST=${state}", "CTX=${context}",
                  "DESC=${description.take(130)}", "SHA=${sha}", "REPO=${repo}"]) {
+            // Must be loud on failure. A silently-rejected POST (403/404 when the
+            // token cannot see the repo) leaves the merge queue waiting the full
+            // check_response_timeout_minutes on a status that will never arrive,
+            // while the Jenkins build itself shows green. Print the body and fail.
             sh '''
                 jq -n --arg s "$ST" --arg c "$CTX" --arg d "$DESC" --arg u "$BUILD_URL" \
                    '{state:$s, context:$c, description:$d, target_url:$u}' \
-                | curl -sS -X POST -o /dev/null -w 'status POST %{http_code}\\n' \
+                | curl -sS -X POST -o /tmp/gh-status.json -w '%{http_code}' \
                     -H "Authorization: Bearer $GH_TOKEN" \
                     -H 'Accept: application/vnd.github+json' \
-                    --data @- "https://api.github.com/repos/$REPO/statuses/$SHA"
+                    --data @- "https://api.github.com/repos/$REPO/statuses/$SHA" > /tmp/gh-code
+                code=$(cat /tmp/gh-code)
+                echo "status POST $CTX=$ST on ${SHA} -> HTTP $code"
+                case "$code" in
+                  2*) ;;
+                  *) echo "--- response ---"; cat /tmp/gh-status.json; echo
+                     echo "FATAL: could not post commit status; a merge queue would" \
+                          "stall for check_response_timeout_minutes waiting for it."
+                     exit 1 ;;
+                esac
             '''
         }
     }
