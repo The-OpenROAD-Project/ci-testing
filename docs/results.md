@@ -218,16 +218,61 @@ Sequence (`main` at 2 items, `MAX_ITEMS=8`):
 - 7b: `ci/check.sh` reported `merge build : yes` and item count 4?
 - 5: released and merged?
 
-### 8. What a merge-commit queue lands — _pending_
+### 8. What a merge-commit queue lands — **PASS** (2026-08-05, PR #9)
 
-Run one PR through with `scripts/watch-queue.sh` recording, then
-`scripts/verify-merge.sh <pr>`.
+`scripts/verify-merge.sh 9`, all three assertions green:
 
-- `main`'s new commit parent count / second parent == PR head?
-- Is it the queue head itself (fast-forward, as under SQUASH) or a new commit?
-- **Tree identical to the validated queue entry?** ← the property that matters
-- `git log --graph --parents --oneline` shape of `main` after several entries:
-- Do speculative entries stack merge commits (`mq-debug` `--graph` output)?
+```
+  PR head      : 337c1ac
+  merge commit : 38de906
+  parents      : 2 (65aa7bf 337c1ac)
+  PASS  merge commit has 2 parents
+  PASS  second parent is the PR head
+  NOTE  main fast-forwarded to the queue head itself
+  PASS  landed tree == validated tree
+```
+
+- **The queue builds the merge commit itself**, inside the queue branch, before
+  any check runs. The queue head `38de906` is titled *"Merge pull request #9
+  from …"* with parents `65aa7bf` (`main`) + `337c1ac` (PR head). Under `SQUASH`
+  that same position held a single-parent commit. So CI validates the exact
+  commit object that will land, not merely an equivalent tree.
+- **`main` fast-forwards to the queue head verbatim** — the same property as the
+  squash era, so it is a merge-queue invariant rather than a merge-method
+  artefact. `merge commit == queue head == what CI tested`.
+- History shape is a normal merge bubble per entry:
+  ```
+  *   38de906 65aa7bf 337c1ac  Merge pull request #9 from ...
+  |\
+  | * 337c1ac 65aa7bf  ci: pivot merge queue to merge commits...
+  |/
+  * 65aa7bf 5912dad  ci: raise MAX_ITEMS to 8 (#8)   <- squash-era, single parent
+  ```
+- Speculative stacking with `max_entries_to_build: 5` is still unobserved — needs
+  scenario 2 (three overlapping PRs).
+
+**Both CI systems confirmed testing the merged tree**, from the `ci/check.sh`
+parent block:
+
+| event | parents | `merge build` | `merge queue` |
+|---|---|---|---|
+| `pull_request` | `65aa7bf 337c1ac` | yes | 0 |
+| `merge_group` | `65aa7bf 337c1ac` | yes | 1 |
+
+Identical parents in both, because `main` did not move between them — which is
+exactly the setup in which stale green is invisible. When the base *does* move,
+only the queue run's parents change; the PR run is not redone. That asymmetry is
+the whole reason the queue exists, and scenario 7 exercises it deliberately.
+
+### Aside: the merge-method flag is inert once a queue exists
+
+`gh pr merge 9 --squash --auto` was **not rejected**, despite
+`allowed_merge_methods: ["merge"]` and `allow_squash_merge=false`. GitHub replied
+*"The merge strategy for main is set by the merge queue"* and enqueued the PR
+normally; the queue's `merge_method` then decided. So per-PR method flags cannot
+override a queue, and the repo/ruleset method restrictions are not enforced at
+enqueue time — they matter for merges that bypass the queue. Verify method
+behaviour by inspecting what lands, never by expecting the CLI to refuse.
 
 ## Status-reporting decision
 

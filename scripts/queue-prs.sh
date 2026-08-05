@@ -10,8 +10,10 @@
 # only adds the PR to the queue once the required checks on the PR head are
 # green, and those are merge-with-target builds (see docs/results.md scenario 7).
 #
-# --merge, not --squash: the queue's merge_method is MERGE and the repo has
-# squash/rebase disabled.
+# --merge, not --squash, for honesty rather than effect: once a merge_queue rule
+# exists the flag is inert. `gh pr merge --squash` is accepted with a warning
+# ("The merge strategy for main is set by the merge queue") and the queue's
+# merge_method decides regardless. See docs/results.md, scenario 8 aside.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
