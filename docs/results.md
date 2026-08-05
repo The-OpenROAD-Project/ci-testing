@@ -23,9 +23,18 @@ it caught was a maintenance commit to `scripts/mk-pr.sh`, which then had to go
 through the queue itself (that became scenario 1). Worth knowing before enabling
 this on a repo where someone expects to hotfix `main`.
 
+## Merge method eras
+
+Scenarios 1 and 4 below ran with `merge_method: SQUASH` — read them as
+**squash-era**. One finding is specific to that method: the queue-branch head
+became `main`'s commit verbatim. From 2026-08-05 the repo is **merge-commit
+only** (queue `MERGE`, ruleset `allowed_merge_methods: ["merge"]`, squash/rebase
+disabled on the repo), so everything from scenario 7 onward describes merge
+commits, and scenario 8 re-establishes what actually lands.
+
 ## Scenarios
 
-### 1. Baseline queue — **PASS** (2026-08-05, Actions only)
+### 1. Baseline queue — **PASS** (2026-08-05, Actions only, squash-era)
 
 Run against PR #2 (`fix/mk-pr-rerunnable`) rather than a synthetic item PR,
 because the ruleset had already blocked the direct push that change needed.
@@ -76,7 +85,7 @@ on a fresh entry without PR2.
 - Did PR3 get a new queue branch:
 - Eviction latency:
 
-### 4. Semantic conflict — **PASS** (2026-08-05)
+### 4. Semantic conflict — **PASS** (2026-08-05, squash-era)
 
 `MAX_ITEMS=2`, one baseline item. PR #4 `alpha` and PR #5 `bravo`, each adding
 one file, enqueued back to back.
@@ -182,6 +191,43 @@ It burns a queue cycle and lies to the author.
 
 Also confirmed as predicted: five orphaned (struck-through) queue-branch jobs
 after three scenarios.
+
+### 7. pr-merge gate blocks entry to the queue — _pending_
+
+Purpose: prove the PR-level gate is a **merge-with-target** build, and that a red
+one keeps the PR out of the queue.
+
+Sequence (`main` at 2 items, `MAX_ITEMS=8`):
+
+1. `scripts/mk-pr.sh foxtrot MAX_ITEMS=3` → 3 items, limit 3, green both alone and
+   merged.
+2. `scripts/mk-pr.sh golf`, queue **golf** alone → `main` goes to 3 items.
+3. **7a, stale green:** foxtrot's checks are not re-run when the base moves, so it
+   still shows green while its merged tree is now 4 items against a limit of 3.
+   Enqueue is *accepted*; the queue entry is what fails. (Same effect bravo #5
+   showed under squash — re-confirm under merge commits.)
+4. **7b, fresh red — the gate:** `git commit --allow-empty` on foxtrot so both CIs
+   rebuild the current merge ref → both red. Then enqueue and assert it never
+   enters the queue: no `added_to_merge_queue` in the timeline, no
+   `gh-readonly-queue/*` ref, `mergeStateStatus=BLOCKED`.
+5. Unblock (merge `main` in, or raise `MAX_ITEMS`) → enqueues and merges, proving
+   the gate releases as well as blocks.
+
+- 7a stale-green enqueue accepted:
+- 7b: `added_to_merge_queue` present?
+- 7b: `ci/check.sh` reported `merge build : yes` and item count 4?
+- 5: released and merged?
+
+### 8. What a merge-commit queue lands — _pending_
+
+Run one PR through with `scripts/watch-queue.sh` recording, then
+`scripts/verify-merge.sh <pr>`.
+
+- `main`'s new commit parent count / second parent == PR head?
+- Is it the queue head itself (fast-forward, as under SQUASH) or a new commit?
+- **Tree identical to the validated queue entry?** ← the property that matters
+- `git log --graph --parents --oneline` shape of `main` after several entries:
+- Do speculative entries stack merge commits (`mq-debug` `--graph` output)?
 
 ## Status-reporting decision
 

@@ -11,12 +11,26 @@ cd "$(dirname "$0")/.."
 
 repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 interval=15
+QUEUE_LOG=.mq-queue-log        # gitignored; consumed by scripts/verify-merge.sh
 
 render() {
   echo "################ $(date '+%H:%M:%S')  ${repo}"
 
   echo "--- queue refs (git ls-remote) ---"
-  git ls-remote origin 'refs/heads/gh-readonly-queue/*' || true
+  refs="$(git ls-remote origin 'refs/heads/gh-readonly-queue/*' || true)"
+  printf '%s\n' "$refs"
+
+  # Record every queue head seen, once. GitHub deletes these refs seconds after
+  # the entry merges, so verify-merge.sh cannot compare the landed tree against
+  # the validated one unless they are captured live. Also fetch the objects, or
+  # the SHAs become unresolvable locally the moment the ref is gone.
+  printf '%s\n' "$refs" | while read -r sha ref; do
+    [ -n "${sha:-}" ] || continue
+    if ! grep -q "^${sha} " "$QUEUE_LOG" 2>/dev/null; then
+      printf '%s %s %s\n' "$sha" "${ref#refs/heads/}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$QUEUE_LOG"
+      git fetch -q origin "$sha" 2>/dev/null || git fetch -q origin "${ref#refs/heads/}" 2>/dev/null || true
+    fi
+  done
 
   # All open PRs, not just mq-test/*: a fixture change routed through the queue
   # is a test run too. mergeStateStatus reads BLOCKED/UNKNOWN mid-flight even

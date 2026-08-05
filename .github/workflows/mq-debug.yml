@@ -28,8 +28,14 @@ jobs:
           echo "base_sha = $MG_BASE_SHA"
           echo "head_ref = $MG_HEAD_REF"
           echo "head_sha = $MG_HEAD_SHA"
-          echo "--- commits this entry stacks on top of base ---"
-          git --no-pager log --oneline "$MG_BASE_SHA..HEAD"
+          echo "--- entry stack: first-parent spine (one line per queued PR) ---"
+          git --no-pager log --oneline --first-parent "$MG_BASE_SHA..HEAD"
+          echo "--- entry stack: full graph with parents ---"
+          # merge_method is MERGE, so each queued PR appears as a merge commit and
+          # the flat log is unreadable without the graph.
+          git --no-pager log --graph --parents --oneline "$MG_BASE_SHA..HEAD"
+          echo "--- HEAD parents ---"
+          git rev-list --parents -1 HEAD
 
       - name: Full event payload
         env:

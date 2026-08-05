@@ -47,12 +47,24 @@ case "$ref" in
   refs/heads/gh-readonly-queue/*|gh-readonly-queue/*) in_queue=1 ;;
 esac
 
+# Parent count proves *what tree* is under test. Both CI systems build a PR as
+# the PR merged with its target (Actions checks out refs/pull/N/merge; the
+# Jenkins PR job uses "merging the PR with the current target branch revision"),
+# so a PR run must show 2 parents. One parent on a PR run would mean the branch
+# is being tested in isolation and the queue gate is worthless.
+parents="$(git rev-list --parents -1 HEAD 2>/dev/null | cut -d' ' -f2- || echo '')"
+nparents="$(printf '%s' "$parents" | wc -w | tr -d ' ')"
+merge_build=no
+[ "$nparents" -ge 2 ] && merge_build=yes
+
 echo "=============================================="
 echo " ci/check.sh"
 echo " system      : $system"
 echo " event       : ${event:-<none>}"
 echo " ref         : ${ref:-<none>}"
 echo " sha         : $sha"
+echo " parents     : ${nparents} ${parents:+(${parents})}"
+echo " merge build : $merge_build  <- yes = testing the merged tree, not the branch alone"
 echo " merge queue : $in_queue"
 echo " config      : MAX_ITEMS=$MAX_ITEMS SLEEP_SECONDS=$SLEEP_SECONDS" \
      "FORCE_FAIL=$FORCE_FAIL QUEUE_ONLY_FAIL=$QUEUE_ONLY_FAIL"

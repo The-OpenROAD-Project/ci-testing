@@ -36,8 +36,14 @@ contexts for OpenROAD / ORFS / OpenSTA as a side effect. Build a dedicated job.
      the other's result. Observed on 2026-08-05 — see `docs/results.md`
      scenario 6.
    - **Discover pull requests from origin** → **Merging the pull request with
-     the current target branch revision**. Without PR jobs, the shared context
-     never lands on a PR head and no PR can enter the queue.
+     the current target branch revision**. Two reasons, both load-bearing:
+     without PR jobs the shared context never lands on a PR head and no PR can
+     enter the queue; and this strategy is what makes the PR job a
+     **merge-with-target** build — i.e. the `pr-merge` gate. Switching it to
+     *The current pull request revision* would test the branch in isolation and
+     the gate would pass on changes that break once merged. `ci/check.sh` prints
+     `merge build : yes` (HEAD has 2 parents) on every run so this cannot regress
+     unnoticed.
    - **Add → Custom Github Notification Context**, label `Public CI`, with
      **"Use job type as context suffix" UNCHECKED**. This is what makes one
      context cover PR jobs, branch jobs and queue-ref jobs — see the section
