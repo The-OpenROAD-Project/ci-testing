@@ -18,7 +18,12 @@ base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^
 branch="mq-test/${slug}"
 
 git fetch origin "$base"
-git switch -c "$branch" "origin/${base}"
+
+# Re-runnable: a scenario gets replayed a lot, so rebuild the branch from the
+# current base instead of failing on leftovers from the previous run.
+git switch --detach "origin/${base}"
+git branch -D "$branch" 2>/dev/null || true
+git switch -c "$branch"
 
 printf 'item %s\n' "$slug" > "items/${slug}.txt"
 git add "items/${slug}.txt"
@@ -38,10 +43,30 @@ done
 git add ci/config.env
 
 git commit -m "test(${slug}): add item$([ $# -gt 0 ] && echo " + $*")"
-git push -u origin "$branch"
 
-gh pr create --base "$base" --head "$branch" \
-  --title "mq-test: ${slug}$([ $# -gt 0 ] && echo " ($*)")" \
-  --body "Merge-queue test PR. Adds \`items/${slug}.txt\`.$([ $# -gt 0 ] && printf '\nOverrides: `%s`' "$*")"
+# The branch was rebuilt from base, so its history is not a fast-forward of any
+# previous run of this scenario.
+git push -u --force origin "$branch"
+
+state="$(gh pr list --head "$branch" --state all --json number,state -q '.[0].state // ""')"
+number="$(gh pr list --head "$branch" --state all --json number,state -q '.[0].number // ""')"
+
+case "$state" in
+  OPEN)
+    echo "PR #${number} already open for ${branch}, updated in place"
+    gh pr view "$number" --json url -q .url
+    ;;
+  CLOSED)
+    echo "reopening closed PR #${number}"
+    gh pr reopen "$number"
+    gh pr view "$number" --json url -q .url
+    ;;
+  *)
+    # No PR, or the previous one was MERGED (cannot be reopened) -> new PR.
+    gh pr create --base "$base" --head "$branch" \
+      --title "mq-test: ${slug}$([ $# -gt 0 ] && echo " ($*)")" \
+      --body "Merge-queue test PR. Adds \`items/${slug}.txt\`.$([ $# -gt 0 ] && printf '\nOverrides: `%s`' "$*")"
+    ;;
+esac
 
 git switch "$base"
