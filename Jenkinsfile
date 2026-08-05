@@ -2,104 +2,41 @@
 
 // Merge-queue test pipeline.
 //
-// Reports a SINGLE status context ('jenkins/ci') for every job type. GitHub
-// applies one required-status-checks list to both PR gating and merge-group
-// validation, but the GitHub Branch Source plugin posts different contexts per
-// job type ('continuous-integration/jenkins/pr-merge' on PR jobs vs
-// '.../branch' on branch jobs — and gh-readonly-queue/* refs are branch jobs).
-// Requiring either plugin context alone therefore deadlocks the other side.
-// Posting our own fixed context from the pipeline sidesteps that entirely.
-
-String REPO    = 'The-OpenROAD-Project/ci-testing'
-String CONTEXT = 'jenkins/ci'
+// Status reporting is deliberately NOT done here. The GitHub Branch Source
+// plugin's "Custom Github Notification Context" trait, with the job-type suffix
+// switched OFF, already posts one context ('Public CI') for PR jobs, branch jobs
+// and gh-readonly-queue/* jobs alike — which is what a merge queue needs, since
+// GitHub applies a single required-checks list to both PR gating and merge-group
+// validation.
+//
+// An earlier revision posted its own 'jenkins/ci' context from the pipeline. It
+// was removed after failing on this instance for two independent reasons, both
+// worth remembering before anyone reintroduces it:
+//   * the jnlp agent image has no `jq`;
+//   * the 'github-token' credential is a fine-grained PAT that gets
+//     403 "Resource not accessible by personal access token" on the statuses
+//     API — a different identity from the classic token behind the
+//     'openroad-ci' credential that the plugin and git operations use.
+// See docs/results.md scenario 6.
 
 k8sPodTemplate(dind: false, cpu: '2', memory: '4Gi', cloud: utilPickCloud()) {
     utilSetProperties()
 
-    String sha = null
+    stage('Checkout') {
+        cleanWs()
+        Map r = checkout(scm)
+        echo "BRANCH_NAME=${env.BRANCH_NAME} CHANGE_ID=${env.CHANGE_ID ?: '-'} GIT_COMMIT=${r.GIT_COMMIT}"
+        utilPrettyPrintMap(r)
 
-    try {
-        stage('Checkout') {
-            cleanWs()
-            Map r = checkout(scm)
-            echo "BRANCH_NAME=${env.BRANCH_NAME} CHANGE_ID=${env.CHANGE_ID ?: '-'} GIT_COMMIT=${r.GIT_COMMIT}"
-            utilPrettyPrintMap(r)
-
-            if (env.CHANGE_ID) {
-                // PR jobs are configured to build the PR merged with the target
-                // branch, so GIT_COMMIT is a throwaway merge commit; a status
-                // posted there gates nothing. Report on the PR head instead.
-                sha = ghApi("repos/${REPO}/pulls/${env.CHANGE_ID}", '.head.sha')
-            } else {
-                // Branch job. For a queue ref this is the queue branch head,
-                // which is exactly the SHA the merge queue watches.
-                sha = r.GIT_COMMIT
-            }
-            echo "Reporting '${CONTEXT}' on ${sha}"
-
-            if (env.BRANCH_NAME?.startsWith('gh-readonly-queue/')) {
-                echo "MERGE QUEUE build: ${env.BRANCH_NAME}"
-            }
+        if (env.BRANCH_NAME?.startsWith('gh-readonly-queue/')) {
+            // The trailing SHA in the ref name is the base branch head at
+            // enqueue time, not the PR head.
+            echo "MERGE QUEUE build: ${env.BRANCH_NAME}"
+            sh 'git --no-pager log --oneline -10'
         }
-
-        // Every path from here must end in a terminal status. If none arrives
-        // the queue stalls until check_response_timeout_minutes, so the catch
-        // below is load-bearing, not hygiene.
-        postStatus(REPO, sha, CONTEXT, 'pending', "Build ${env.BUILD_NUMBER} running")
-
-        stage('Check') {
-            sh './ci/check.sh'
-        }
-
-        postStatus(REPO, sha, CONTEXT, 'success', 'Checks passed')
-    } catch (err) {
-        if (sha) {
-            postStatus(REPO, sha, CONTEXT, 'failure', "Failed: ${err.message ?: 'error'}")
-        }
-        throw err
     }
-}
 
-// --- helpers, local to this test repo (deliberately not in the shared library) ---
-
-// The available credential is secret-text ('github-token', used the same way in
-// jenkins-ci/vars/utilPoolPRLabels.groovy), and a raw API call keeps the context
-// name and target SHA fully under this repo's control.
-String ghApi(String path, String jqFilter) {
-    withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
-        return sh(returnStdout: true, script: """
-            curl -sSf -H "Authorization: Bearer \$GH_TOKEN" \
-                 -H 'Accept: application/vnd.github+json' \
-                 'https://api.github.com/${path}' | jq -r '${jqFilter}'
-        """).trim()
-    }
-}
-
-void postStatus(String repo, String sha, String context, String state, String description) {
-    withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
-        withEnv(["ST=${state}", "CTX=${context}",
-                 "DESC=${description.take(130)}", "SHA=${sha}", "REPO=${repo}"]) {
-            // Must be loud on failure. A silently-rejected POST (403/404 when the
-            // token cannot see the repo) leaves the merge queue waiting the full
-            // check_response_timeout_minutes on a status that will never arrive,
-            // while the Jenkins build itself shows green. Print the body and fail.
-            sh '''
-                jq -n --arg s "$ST" --arg c "$CTX" --arg d "$DESC" --arg u "$BUILD_URL" \
-                   '{state:$s, context:$c, description:$d, target_url:$u}' \
-                | curl -sS -X POST -o /tmp/gh-status.json -w '%{http_code}' \
-                    -H "Authorization: Bearer $GH_TOKEN" \
-                    -H 'Accept: application/vnd.github+json' \
-                    --data @- "https://api.github.com/repos/$REPO/statuses/$SHA" > /tmp/gh-code
-                code=$(cat /tmp/gh-code)
-                echo "status POST $CTX=$ST on ${SHA} -> HTTP $code"
-                case "$code" in
-                  2*) ;;
-                  *) echo "--- response ---"; cat /tmp/gh-status.json; echo
-                     echo "FATAL: could not post commit status; a merge queue would" \
-                          "stall for check_response_timeout_minutes waiting for it."
-                     exit 1 ;;
-                esac
-            '''
-        }
+    stage('Check') {
+        sh './ci/check.sh'
     }
 }

@@ -27,23 +27,26 @@ contexts for OpenROAD / ORFS / OpenSTA as a side effect. Build a dedicated job.
      repo.
 
 3. **Behaviours** — this is what decides whether merge queue works at all.
-   - **Discover branches** → strategy **All branches**.
-     The queue refs `gh-readonly-queue/main/pr-N-<sha>` are ordinary branches,
-     not PR heads, so "Exclude branches that are also filed as PRs" does not
-     hide them — but *All branches* removes all doubt.
+   - **Discover branches** → strategy **Exclude branches that are also filed as
+     PRs**.
+     Queue refs `gh-readonly-queue/main/pr-N-<base-sha>` are ordinary branches,
+     not PR heads, so they are still discovered. Do **not** use *All branches*:
+     with a single shared status context (below), the branch job and the PR job
+     both write that context on the same commit and the later one wins, masking
+     the other's result. Observed on 2026-08-05 — see `docs/results.md`
+     scenario 6.
    - **Discover pull requests from origin** → **Merging the pull request with
-     the current target branch revision**.
-     This is why the `Jenkinsfile` resolves the PR head SHA via the API: with
-     this strategy `GIT_COMMIT` is a throwaway merge commit, and a status posted
-     there gates nothing.
-   - Recommended: **Add → Filter by name (with wildcards)**, *Include*:
-     ```
-     main gh-readonly-queue/main/**
-     ```
-     Keeps the job from indexing every scratch branch while still admitting
-     queue refs. Get this pattern wrong and the merge queue simply never
-     receives a Jenkins status. (The filter applies to branches, not PRs.)
-   - Do **not** add *Custom Github Notification Context* yet — that is route B.
+     the current target branch revision**. Without PR jobs, the shared context
+     never lands on a PR head and no PR can enter the queue.
+   - **Add → Custom Github Notification Context**, label `Public CI`, with
+     **"Use job type as context suffix" UNCHECKED**. This is what makes one
+     context cover PR jobs, branch jobs and queue-ref jobs — see the section
+     below.
+   - Do **not** add *Filter by name (with wildcards)*. It filters **all** SCM
+     heads, not just branches: PRs are heads named `PR-<n>`, so an include list
+     of `main gh-readonly-queue/main/**` silently hides every pull request
+     (observed here as *Pull Requests (0)* with an open PR). Queue-ref discovery
+     needs no filter at all.
 
 4. **Build Configuration**: *by Jenkinsfile*, Script Path `Jenkinsfile`.
 
@@ -58,9 +61,12 @@ contexts for OpenROAD / ORFS / OpenSTA as a side effect. Build a dedicated job.
    GitHub deletes the ref. Without pruning these grow without bound — a real
    finding for the production repos, not just test hygiene.
 
-7. **Save**. The initial scan builds `main`. Confirm in the build log:
-   - `status POST 201` from the `postStatus` helper, and
-   - the `jenkins/ci` context on the `main` commit in GitHub.
+7. **Save**. The initial scan builds `main`. Confirm the `Public CI` context
+   appears on the `main` commit in GitHub:
+   ```bash
+   gh api repos/The-OpenROAD-Project/ci-testing/commits/main/status \
+     -q '.statuses[] | "\(.context)=\(.state)"'
+   ```
 
 8. **Webhook check** — GitHub repo → *Settings* → *Webhooks*: a hook to
    `https://jenkins.openroad.tools/github-webhook/`, content type
@@ -71,27 +77,44 @@ contexts for OpenROAD / ORFS / OpenSTA as a side effect. Build a dedicated job.
    `merge_group` is a GitHub Actions concern — Jenkins is driven by the **push**
    to the queue branch.
 
-9. **Route B, only after route A is proven working.** On a clone of this job (or
-   the org folder, accepting the blast radius): *Configure* → Behaviours →
-   **Add → Custom Github Notification Context**, label `Public CI`, and leave
-   **"Use job type as context suffix" unchecked** so PR and branch jobs share
-   one context. Re-scan and compare with route A in `docs/results.md`.
-   If done on the shared org folder, update branch protection **first** or open
-   PRs block on contexts nobody posts — same ordering warning as
+9. If this is ever applied to the shared org folder instead of a standalone job,
+   update branch protection **first** or open PRs block on contexts nobody posts
+   — same ordering warning as
    `archive/jenkins-ci/github-status-context-migration.md`.
 
-## Why the Jenkinsfile posts its own status (route A)
+## Why one unsuffixed context, and why not per-job-type
 
-The GitHub Branch Source plugin posts per-job-type contexts:
+By default the GitHub Branch Source plugin posts per-job-type contexts:
 `continuous-integration/jenkins/pr-merge` on PR jobs,
 `continuous-integration/jenkins/branch` on branch jobs. GitHub applies **one**
-required-status-checks list to both PR gating and merge-group validation, so:
+required-status-checks list to both PR gating and merge-group validation, so
+under a merge queue:
 
 - require `.../pr-merge` → queue entries never get it → queue times out;
 - require `.../branch` → PR heads never get it → PRs can never be queued.
 
-Route A posts `jenkins/ci` from the pipeline on every job type, which satisfies
-both. Route B achieves the same with an unsuffixed plugin context instead.
+The fix is the *Custom Github Notification Context* trait with the job-type
+suffix **off**: every job type posts the same `Public CI`, which satisfies both
+sides. This is the recommended configuration.
+
+Two rejected alternatives, for the record:
+
+- **Pipeline-posted context (`githubNotify` or a raw statuses-API call in the
+  `Jenkinsfile`).** Tried first, since it needs no server-side config. Failed on
+  this instance twice over: no `jq` on the jnlp agent, and the `github-token`
+  credential is a fine-grained PAT that returns 403 *"Resource not accessible by
+  personal access token"* on the statuses API — a different identity from the
+  classic token behind `openroad-ci`. Viable only with a token fixed for
+  commit-status write, and it duplicates what the trait already does.
+- **Per-stage GitHub Checks (`withChecks`).** Needs a GitHub App credential and
+  two distinct apps across the two controllers, per
+  `archive/jenkins-ci/github-status-context-migration.md`.
+
+**The trap that comes with one shared context:** exactly one job must write it
+per commit. With *Discover branches: All branches*, a PR head is built by both a
+branch job and a PR job; both post `Public CI` on the same SHA and the later
+write wins, masking the other result. Hence *Exclude branches that are also filed
+as PRs* in step 3.
 
 ## Verified on 2026-08-05 (job `DevOps/ci-testing-Public`)
 
@@ -107,12 +130,17 @@ both. Route B achieves the same with an unsuffixed plugin context instead.
   gh api -X PUT repos/The-OpenROAD-Project/ci-testing/collaborators/openroad-ci \
     -f permission=push
   ```
-- **PR discovery is not on by default here.** The job showed *Pull Requests (0)*
-  with an open PR. Add **Discover pull requests from origin** or `jenkins/ci`
-  never reaches a PR head, and requiring it blocks every PR from entering the
-  queue.
-- **Orphaned jobs pile up immediately** — four struck-through queue branches
-  after two scenarios. The orphaned-item strategy in step 6 is mandatory.
+- **A wildcard name filter hides pull requests.** The job showed
+  *Pull Requests (0)* with an open PR, because the filter applies to all SCM
+  heads and PRs are heads named `PR-<n>`. Removing the filter fixed it.
+- **One context, two writers.** With *All branches*, PR #5's head got
+  `Public CI=error` from job `PR-5` (18:11:14) and `Public CI=success` from job
+  `mq-test/bravo` (18:11:38). Both were individually correct — the PR job builds
+  merged-with-target (3 items, fails), the branch job builds the branch alone
+  (2 items, passes) — but the second overwrote the first, so GitHub showed
+  green. Fixed by *Exclude branches that are also filed as PRs*.
+- **Orphaned jobs pile up immediately** — five struck-through queue branches
+  after three scenarios. The orphaned-item strategy in step 6 is mandatory.
 
 ## Known interactions (already verified against the shared library)
 
@@ -121,8 +149,9 @@ both. Route B achieves the same with an unsuffixed plugin context instead.
   default `+refs/heads/*` refspec as a plain branch — correct.
 - `utilIsTrunk()` is false for queue refs, so short artifact retention applies
   (`utilSetProperties`).
-- The Jenkinsfile needs `jq` and `curl` on the jnlp agent image. If `jq` is
-  absent, build the JSON body with `printf` instead.
+- The jnlp agent image (`us-docker.pkg.dev/foss-fpga-tools-ext-openroad/jenkins/jnlp-agent:latest`)
+  has **no `jq`**. Anything in a pipeline that assumes it will fail with
+  `jq: not found`.
 - Both a PR job and a queue-branch job run for every merged PR, so CI cost per
   PR roughly doubles under a merge queue. Worth quantifying before enabling
   this on OpenROAD.

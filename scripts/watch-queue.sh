@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live view of the merge queue: live gh-readonly-queue refs, the commit stack of
 # each entry, per-SHA status contexts (Actions check runs AND the Jenkins
-# 'jenkins/ci' status), and PR auto-merge state.
+# 'Public CI' status), and PR auto-merge state.
 #
 #   scripts/watch-queue.sh          # refresh every 15s until Ctrl-C
 #   scripts/watch-queue.sh once
