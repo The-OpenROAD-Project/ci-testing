@@ -6,10 +6,14 @@ Fill in as scenarios run. Dates absolute.
 
 - Repo: `The-OpenROAD-Project/ci-testing` (public — required, org is on `team`)
 - Actions check: `ci`
-- Jenkins: public instance, standalone multibranch job, context `jenkins/ci`
-  (route A — pipeline-posted). **Not yet configured** as of scenario 1.
-- Ruleset id: `20469423`, `enforcement=active`. Required checks: `ci` only so
-  far; `jenkins/ci` added later, after the Jenkins probe.
+- Jenkins: public instance, standalone multibranch job
+  `DevOps/ci-testing-Public`, context **`Public CI`** (plugin trait, unsuffixed —
+  route B; route A rejected, see scenario 6).
+- Ruleset id: `20469423`, `enforcement=active`. Required checks: `ci` alone for
+  scenarios 1 and 4; **`ci` + `Public CI`** from 2026-08-05 18:46 onward, so both
+  CI systems gate the queue.
+- `MAX_ITEMS` raised 2 → 8 after scenario 4, otherwise every later item PR fails
+  on count and the batching/eviction runs are unreadable.
 
 Confirmed on 2026-08-05: merge queue **is** available on a `team`-plan org for a
 public repo. The plan restriction is about private repos only.
