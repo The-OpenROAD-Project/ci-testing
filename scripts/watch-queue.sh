@@ -18,10 +18,21 @@ render() {
   echo "--- queue refs (git ls-remote) ---"
   git ls-remote origin 'refs/heads/gh-readonly-queue/*' || true
 
-  echo "--- open mq-test PRs ---"
+  # All open PRs, not just mq-test/*: a fixture change routed through the queue
+  # is a test run too. mergeStateStatus reads BLOCKED/UNKNOWN mid-flight even
+  # when nothing is wrong, so treat it as a hint, not a verdict.
+  echo "--- open PRs ---"
   gh pr list --state open --json number,headRefName,mergeStateStatus,autoMergeRequest \
-    -q '.[] | select(.headRefName | startswith("mq-test/"))
-         | "#\(.number) \(.headRefName) merge_state=\(.mergeStateStatus) auto=\(.autoMergeRequest != null)"' || true
+    -q '.[] | "#\(.number) \(.headRefName) merge_state=\(.mergeStateStatus) auto=\(.autoMergeRequest != null)"' || true
+
+  # Ground truth for what the queue actually did, unlike polled PR state:
+  # removed_from_merge_queue and merged land ~1s apart.
+  echo "--- recent queue timeline events ---"
+  for n in $(gh pr list --state all -L 5 --json number -q '.[].number'); do
+    gh api "repos/${repo}/issues/${n}/timeline" --paginate \
+      -q '.[] | select(.event | test("merge_queue|^merged$")) | "  #'"${n}"' \(.event) \(.created_at)"' \
+      2>/dev/null | tail -4
+  done
 
   echo "--- status contexts per queue entry ---"
   # Combined status = the legacy statuses API (where Jenkins reports); check-runs

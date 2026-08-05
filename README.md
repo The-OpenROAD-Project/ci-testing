@@ -7,6 +7,10 @@ used by OpenROAD:
 - **Jenkins** (public instance) — via branch builds of the ephemeral
   `gh-readonly-queue/<base>/pr-N-<sha>` refs (`Jenkinsfile`)
 
+`<sha>` there is the **base branch head** at enqueue time, not the PR head —
+verified in `docs/results.md` scenario 1. Don't build tooling that assumes
+otherwise.
+
 Nothing here is production. The point is to make every merge-queue behaviour
 reproducible in minutes and to settle how Jenkins should report status under a
 merge queue before touching the real repos.

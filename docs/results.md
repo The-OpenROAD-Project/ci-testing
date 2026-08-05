@@ -7,21 +7,49 @@ Fill in as scenarios run. Dates absolute.
 - Repo: `The-OpenROAD-Project/ci-testing` (public — required, org is on `team`)
 - Actions check: `ci`
 - Jenkins: public instance, standalone multibranch job, context `jenkins/ci`
-  (route A — pipeline-posted)
-- Ruleset id: _TBD_
+  (route A — pipeline-posted). **Not yet configured** as of scenario 1.
+- Ruleset id: `20469423`, `enforcement=active`. Required checks: `ci` only so
+  far; `jenkins/ci` added later, after the Jenkins probe.
+
+Confirmed on 2026-08-05: merge queue **is** available on a `team`-plan org for a
+public repo. The plan restriction is about private repos only.
+
+The ruleset blocks direct pushes to `main` for org admins too — the first thing
+it caught was a maintenance commit to `scripts/mk-pr.sh`, which then had to go
+through the queue itself (that became scenario 1). Worth knowing before enabling
+this on a repo where someone expects to hotfix `main`.
 
 ## Scenarios
 
-### 1. Baseline queue — _pending_
+### 1. Baseline queue — **PASS** (2026-08-05, Actions only)
 
-One PR, `SLEEP_SECONDS=30`.
-Expected: Actions `merge_group` run + a Jenkins branch job on
-`gh-readonly-queue/main/pr-N-<sha>`; both green; PR merges.
+Run against PR #2 (`fix/mk-pr-rerunnable`) rather than a synthetic item PR,
+because the ruleset had already blocked the direct push that change needed.
+`SLEEP_SECONDS=60` (repo default).
 
-- Queue branch name observed:
-- Actions run:
-- Jenkins job:
-- Time from enqueue to merge:
+- **Queue branch:**
+  `gh-readonly-queue/main/pr-2-141870d0b65a77508a1fb6bf99532c5a315437be`
+  → the trailing SHA is the **base branch head** at enqueue time (`141870d` was
+  `main`), *not* the PR head. Confirmed by comparison with `main`'s log. Any
+  tooling that parses these refs must not assume a PR SHA.
+- **Queue branch head** `db4b4b0` became the merge commit on `main` verbatim —
+  the queue fast-forwards `main` to the entry it validated, so the merged code
+  is byte-identical to what CI tested. This is the property that PR-level CI
+  cannot offer.
+- **Actions:** both `merge_group` workflows ran on the queue ref — `CI` (`ci`,
+  required) and `MQ debug` (observability). The `pull_request` run of `ci` was
+  separate, so this PR consumed two `ci` runs total.
+- **Jenkins:** not configured yet — n/a for this run.
+- **Timeline:** `auto_merge_enabled` 17:48:04 → `added_to_merge_queue` 17:48:40
+  → `removed_from_merge_queue` 17:50:48 → `merged` 17:50:49 →
+  `head_ref_deleted` 17:50:50. **2m09s enqueue-to-merge** against a 60s check,
+  so `min_entries_to_merge_wait_minutes: 2` dominated the wall clock, not CI.
+- **Gotcha for observers:** `gh pr view` reported `state=OPEN` and the queue ref
+  was still listed within the same minute the merge landed; `removed_from_merge_queue`
+  and `merged` are 1s apart. Read the issue timeline
+  (`gh api repos/.../issues/N/timeline`) for ground truth — polling
+  `mergeStateStatus` mid-flight shows `BLOCKED`/`UNKNOWN` and reads like a
+  failure when nothing is wrong.
 
 ### 2. Speculative batching — _pending_
 
