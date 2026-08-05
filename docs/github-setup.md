@@ -46,11 +46,11 @@ context is allowed to block it:
 ```bash
 jq 'del(.rules[] | select(.type=="required_status_checks")
         | .parameters.required_status_checks[]
-        | select(.context=="jenkins/ci"))' docs/ruleset.json \
+        | select(.context=="Public CI"))' docs/ruleset.json \
   | gh api -X POST repos/The-OpenROAD-Project/ci-testing/rulesets --input -
 ```
 
-Once `jenkins/ci` is confirmed posting on both PR heads and queue branches
+Once `Public CI` is confirmed posting on both PR heads and queue branches
 (`scripts/fake-queue-branch.sh` proves this without a real queue), swap in the
 full ruleset:
 
@@ -80,8 +80,11 @@ gh api "repos/The-OpenROAD-Project/ci-testing/rulesets/${RULESET_ID}" \
 ## 4. Required check names
 
 - `ci` — the job `name:` in `.github/workflows/ci.yml`.
-- `jenkins/ci` — posted by `Jenkinsfile`, deliberately not
-  `continuous-integration/jenkins/*`. See `docs/jenkins-setup.md` for why.
+- `Public CI` — posted by the GitHub Branch Source plugin's *Custom Github
+  Notification Context* trait with the job-type suffix off, so one name covers
+  PR jobs, branch jobs and `gh-readonly-queue/*` jobs. Deliberately not
+  `continuous-integration/jenkins/*`, which is per-job-type and cannot gate both
+  PR merges and merge groups. See `docs/jenkins-setup.md`.
 
 `mq-debug` is intentionally **not** required; it is observability only.
 

@@ -131,39 +131,70 @@ full `check_response_timeout_minutes` while Jenkins reports success — a silent
 non-posting status is worse than a red build. Any real rollout needs the
 loud-failure version.
 
-**Second gap:** the job shows **Pull Requests (0)** with PR #5 open, so
-"Discover pull requests from origin" is not in effect. Without PR jobs,
-`jenkins/ci` never lands on a PR head, and making it required would block every
-PR from being queued at all — the exact deadlock described in
-`docs/jenkins-setup.md`. Must be fixed before step 6 of `docs/github-setup.md`.
+Once `openroad-ci` was granted `push` on the repo, statuses started flowing —
+but from the **plugin**, not the pipeline: context `Public CI`, unsuffixed. The
+*Custom Github Notification Context* trait was already configured on the job; it
+had been failing silently for the same permission reason.
 
-**Third, as predicted:** the branch list already shows the four queue branches
-struck through (orphaned) after two runs. Confirms the orphaned-item strategy is
-mandatory, not hygiene.
+**Route A is dead.** The `main` build console (build #6) shows both of its
+independent failure modes at once:
 
-Fixes required, in order:
-
-```bash
-# 1. let the CI identity write statuses on this repo
-gh api -X PUT repos/The-OpenROAD-Project/ci-testing/collaborators/openroad-ci \
-  -f permission=push
+```
++ jq -n --arg s pending --arg c jenkins/ci ...
+script.sh.copy: 2: jq: not found
++ code=403
+status POST jenkins/ci=pending on 248f2e3… -> HTTP 403
+{ "message": "Resource not accessible by personal access token", ... }
 ```
 
-2. Job → Configure → Behaviours → add **Discover pull requests from origin**
-   (*Merging the pull request with the current target branch revision*), re-scan,
-   confirm the Pull Requests tab is non-empty.
-3. Merge the loud-failure `Jenkinsfile`, re-run, confirm
-   `status POST jenkins/ci=success on <sha> -> HTTP 201`.
+- The jnlp agent image has **no `jq`** — my assumption in the original design.
+- `github-token` is a **fine-grained PAT** without commit-status write. It is a
+  different identity from the classic token behind the `openroad-ci` credential
+  that the plugin and all git operations use — so granting `openroad-ci` write
+  did nothing for it.
 
-## Route A vs route B
+The loud-failure rewrite did its job: instead of a green build with no status, it
+surfaced the exact HTTP code and body. That diagnostic is the only reason this
+was found in minutes rather than as a 15-minute queue stall in production.
+`postStatus`/`ghApi` have since been removed from the `Jenkinsfile` entirely.
 
-| | A: pipeline-posted `jenkins/ci` | B: unsuffixed plugin context |
+**New defect found — one context, two writers.** After PR discovery started
+working, PR #5's head received `Public CI` twice:
+
+| time | job | state | correct? |
+|---|---|---|---|
+| 18:11:14 | `PR-5` (merged with target, 3 items) | `error` | yes |
+| 18:11:38 | `mq-test/bravo` (branch alone, 2 items) | `success` | yes |
+
+Both results were right for what they built; the later write overwrote the
+earlier, so GitHub displayed **green** for a PR whose merge-with-target build had
+failed. Cause: *Discover branches: All branches* builds a PR head as a branch
+*and* as a PR, and with the suffix disabled both write the same context name.
+Fix: *Exclude branches that are also filed as PRs*.
+
+Under a merge queue the consequence is bounded but real — such a PR enters the
+queue on a false green, and the queue entry catches it, so `main` stays safe.
+It burns a queue cycle and lies to the author.
+
+Also confirmed as predicted: five orphaned (struck-through) queue-branch jobs
+after three scenarios.
+
+## Status-reporting decision
+
+| | A: pipeline-posted `jenkins/ci` | B: unsuffixed plugin context `Public CI` |
 |---|---|---|
-| Server config needed | none | org folder / job Behaviours |
-| Blast radius | this repo only | every repo the folder scans |
-| Correct SHA on PR jobs | explicit head lookup | plugin's own choice |
-| Failure mode if pipeline dies early | covered by `catch` | plugin still reports |
-| Verdict | _TBD_ | _TBD_ |
+| Server config needed | none | job/folder Behaviours |
+| Works on this instance | **no** — no `jq`, and `github-token` 403s | **yes** |
+| Credential | `github-token` (fine-grained PAT, insufficient) | `openroad-ci` (classic, already works) |
+| Covers PR + branch + queue refs | by construction | **verified** — same name on all three |
+| Blast radius | this repo only | every repo the folder scans (use a standalone job) |
+| Extra failure surface | pipeline code, `jq`, token scope | none beyond the plugin |
+| **Verdict** | **rejected** | **adopted** |
+
+Route B wins outright here. Route A's only advantage — no server-side config —
+does not survive contact with an agent image that lacks `jq` and a credential
+that cannot write statuses. Required check name is therefore `Public CI`, and it
+depends on exactly one job writing it per commit.
 
 ## Recommendation for the production repos
 

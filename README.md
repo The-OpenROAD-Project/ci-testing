@@ -24,8 +24,10 @@ merge queue before touching the real repos.
    Branch Source plugin posts `continuous-integration/jenkins/pr-merge` on PR
    jobs and `.../branch` on branch jobs, but GitHub applies one
    required-checks list to both PR gating *and* merge-group validation.
-   Requiring either name alone deadlocks the other side, so the `Jenkinsfile`
-   posts its own fixed `jenkins/ci` context instead. → `docs/jenkins-setup.md`
+   Requiring either name alone deadlocks the other side. Solved server-side with
+   the *Custom Github Notification Context* trait, suffix off, so every job type
+   posts one `Public CI` — and exactly one job may write it per commit.
+   → `docs/jenkins-setup.md`
 
 ## Layout
 
@@ -35,7 +37,7 @@ ci/config.env            MAX_ITEMS, SLEEP_SECONDS, FORCE_FAIL, QUEUE_ONLY_FAIL
 items/*.txt              one file per test PR; the count is what check.sh gates on
 .github/workflows/ci.yml required check `ci` (pull_request + merge_group + push)
 .github/workflows/mq-debug.yml  merge_group observability, not required
-Jenkinsfile              k8sPodTemplate + ci/check.sh + `jenkins/ci` status
+Jenkinsfile              k8sPodTemplate + ci/check.sh (status comes from the plugin)
 scripts/                 drivers: mk-pr, queue-prs, watch-queue, fake-queue-branch
 docs/github-setup.md     repo + ruleset commands, ruleset knob meanings
 docs/jenkins-setup.md    Jenkins Web UI walkthrough
@@ -54,7 +56,7 @@ behaviour travels with the PR into the queue.
 | 2 | Speculative batching | 3 PRs with `SLEEP_SECONDS=180`, enqueued back to back | Several queue entries at once, each stacking the PRs ahead of it |
 | 3 | Mid-queue eviction | middle PR gets `QUEUE_ONLY_FAIL=1` | green as a PR, red in the queue → evicted; others rebuilt without it |
 | 4 | Semantic conflict | two PRs, each adding one item, `MAX_ITEMS=2` | each passes alone at 2 items, the batch fails at 3 — what PR-level CI cannot catch |
-| 5 | Jenkins gating | require `jenkins/ci`, then disable the Jenkins job | queue waits, evicts at `check_response_timeout_minutes` |
+| 5 | Jenkins gating | require `Public CI`, then disable the Jenkins job | queue waits, evicts at `check_response_timeout_minutes` |
 | 6 | Jenkins-only probe | `scripts/fake-queue-branch.sh` | Jenkins indexes and builds a synthetic queue ref and posts status — no queue needed |
 
 Watch any of them with:
