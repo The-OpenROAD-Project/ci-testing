@@ -28,6 +28,7 @@ git switch -c "$branch"
 printf 'item %s\n' "$slug" > "items/${slug}.txt"
 git add "items/${slug}.txt"
 
+restore=""
 for kv in "$@"; do
   key="${kv%%=*}"
   val="${kv#*=}"
@@ -35,6 +36,9 @@ for kv in "$@"; do
     echo "no such knob in ci/config.env: ${key}" >&2
     exit 1
   fi
+  # Remember the pre-override value: merging this PR makes the override the repo
+  # default, and whoever cleans up needs to know what to put back.
+  restore="${restore}${restore:+ }$(grep -E "^${key}=" ci/config.env | head -1)"
   # BSD and GNU sed disagree on -i, so rewrite via a temp file. -f because `mv`
   # is commonly aliased to `mv -i`, which would prompt and silently no-op the
   # override if this ever runs somewhere aliases are expanded.
@@ -45,6 +49,18 @@ done
 git add ci/config.env
 
 git commit -m "test(${slug}): add item$([ $# -gt 0 ] && echo " + $*")"
+
+if [ -n "$restore" ]; then
+  cat >&2 <<EOF
+
+!! ci/config.env overrides are COMMITTED to this branch, so they become the repo
+!! default if this PR merges. That is how main ended up with MAX_ITEMS=4 after
+!! scenario 7 and SLEEP_SECONDS=180 after scenario 2.
+!! Either close this PR when the scenario ends, or follow up with a PR restoring:
+!!   ${restore}
+
+EOF
+fi
 
 # The branch was rebuilt from base, so its history is not a fast-forward of any
 # previous run of this scenario.

@@ -64,16 +64,67 @@ because the ruleset had already blocked the direct push that change needed.
   `mergeStateStatus` mid-flight shows `BLOCKED`/`UNKNOWN` and reads like a
   failure when nothing is wrong.
 
-### 2. Speculative batching — _pending_
+### 2. Speculative batching — **PASS** (2026-08-05, merge-commit era)
 
-Three PRs enqueued inside one CI duration (`SLEEP_SECONDS=180`).
-Expected: up to `max_entries_to_build` (5) entries build concurrently, each
-stacking the PRs ahead of it. `mq-debug` prints
-`git log base_sha..HEAD` — that output is the evidence.
+PRs #14 `charlie`, #15 `delta`, #16 `echo`, all cut from `a788a1d` with
+`SLEEP_SECONDS=180`, enqueued back to back by `scripts/queue-prs.sh`.
 
-- Entries created:
-- Commit stack per entry:
-- Merge order:
+**Entries are speculative — each builds on the one ahead of it.** The base SHA in
+each queue ref is the *previous entry's head*, not `main`:
+
+| entry | ref base | = |
+|---|---|---|
+| `pr-14-a788a1d…` | `a788a1d` | `main` at enqueue |
+| `pr-15-192ec44…` | `192ec44` | **pr-14's queue head** |
+| `pr-16-407b5d6…` | `407b5d6` | **pr-15's queue head** |
+
+So entry 3 was validated against a tree containing PRs 1 and 2 — the queue did
+not serialize and re-base one at a time, which is what scenario 4 saw when the
+PRs were too far apart in time to overlap.
+
+**Timings** (all three enqueued within 32s):
+
+| PR | added | merged | total |
+|---|---|---|---|
+| #14 | 22:41:23 | 22:45:21 | 3m58s |
+| #15 | 22:41:32 | 22:45:21 | 3m49s |
+| #16 | 22:41:55 | 22:46:01 | 4m06s |
+
+#14 and #15 merged in the **same second** — the queue merged a batch, not a
+sequence. Three PRs landed in 4m38s wall-clock against a 180s check; serialized
+they would have taken roughly 3 × (180s + 2min wait) ≈ 15 min. That ratio is the
+argument for speculation on a busy repo.
+
+**Resulting history** is a clean first-parent spine of merge commits, each PR's
+own commit hanging off it:
+
+```
+*   fc3e369 407b5d6 4cac11c  Merge pull request #16 (echo)
+|\
+| * 4cac11c a788a1d          test(echo): add item
+* |   407b5d6 192ec44 0f1cfb1  Merge pull request #15 (delta)
+|\ \
+| * | 0f1cfb1 a788a1d        test(delta): add item
+* |   192ec44 a788a1d 637f471  Merge pull request #14 (charlie)
+```
+
+Note every PR head's parent is `a788a1d`: the branches were never rebased. The
+queue built the *merge*, not a rewritten branch, which is why the PR commits keep
+their original parentage.
+
+**Jenkins under concurrent load:** three `gh-readonly-queue` jobs ran at once,
+each holding a 2-CPU pod, and all reported in time — no agent-pool contention at
+this size. That says nothing about OpenROAD-sized builds; the open question is
+whether pods queue long enough to approach `check_response_timeout_minutes: 15`.
+
+**Bug this run exposed — config overrides leak to `main`.** All three PRs merged,
+so their `SLEEP_SECONDS=180` became the repo default, making every subsequent run
+on every branch pay three minutes. Identical to the `MAX_ITEMS=4` leak after
+scenario 7, so it is systemic, not a slip: `mk-pr.sh` must commit overrides for
+them to travel into the queue, and merging the PR then promotes them. Mitigated
+by having `mk-pr.sh` print the pre-override values and a restore reminder;
+the real rule is **close scenario PRs rather than merging them** when they carry
+overrides.
 
 ### 3. Mid-queue eviction — _pending_
 
