@@ -5,8 +5,13 @@
 #   scripts/queue-prs.sh 1 2 3
 #   scripts/queue-prs.sh            # every open mq-test/* PR, lowest number first
 #
-# `gh pr merge --auto` is the enqueue path once a merge_queue rule exists: the
-# PR enters the queue as soon as its PR-level required checks are green.
+# `gh pr merge --auto` is the enqueue path once a merge_queue rule exists — the
+# equivalent of clicking "Merge when ready". It is accepted immediately; GitHub
+# only adds the PR to the queue once the required checks on the PR head are
+# green, and those are merge-with-target builds (see docs/results.md scenario 7).
+#
+# --merge, not --squash: the queue's merge_method is MERGE and the repo has
+# squash/rebase disabled.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -27,7 +32,7 @@ fi
 
 for pr in "${prs[@]}"; do
   echo "== enqueue #${pr}"
-  gh pr merge "$pr" --squash --auto
+  gh pr merge "$pr" --merge --auto
 done
 
 echo

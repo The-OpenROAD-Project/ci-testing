@@ -21,8 +21,19 @@ gh repo create The-OpenROAD-Project/ci-testing --public \
   --description 'Scratch repo for testing GitHub merge queue against Actions + Jenkins'
 
 gh api -X PATCH repos/The-OpenROAD-Project/ci-testing \
-  -F allow_auto_merge=true -F delete_branch_on_merge=true -F allow_squash_merge=true
+  -F allow_auto_merge=true -F delete_branch_on_merge=true \
+  -F allow_merge_commit=true -F allow_squash_merge=false -F allow_rebase_merge=false
 ```
+
+**Merge commits only.** The queue's `merge_method` is `MERGE`, the ruleset's
+`allowed_merge_methods` is `["merge"]`, and squash/rebase are disabled at the
+repo level too. Three layers for one decision, deliberately: it means nothing can
+quietly land as a squash, and `gh pr merge --squash` fails loudly rather than
+producing history that does not match what the scenarios describe.
+
+Apply the ruleset change **before** the repo-settings change when switching
+methods, so there is never a window where the ruleset permits a method the repo
+has disabled.
 
 ## 2. Push this tree
 
@@ -71,7 +82,7 @@ gh api "repos/The-OpenROAD-Project/ci-testing/rulesets/${RULESET_ID}" \
 
 | Parameter | Value | Effect on the tests |
 |---|---|---|
-| `merge_method` | `SQUASH` | Queue merges land as one commit each |
+| `merge_method` | `MERGE` | Each entry lands as a two-parent merge commit; `scripts/verify-merge.sh` asserts the shape |
 | `grouping_strategy` | `ALLGREEN` | An entry merges only if it and everything ahead of it is green |
 | `max_entries_to_build` | `5` | How many speculative entries build concurrently — the batching test needs > 1 |
 | `min_entries_to_merge` / `..._wait_minutes` | `1` / `2` | Waits up to 2 min to batch, then merges what it has |
