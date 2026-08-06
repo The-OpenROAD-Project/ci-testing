@@ -48,11 +48,27 @@ contexts for OpenROAD / ORFS / OpenSTA as a side effect. Build a dedicated job.
      **"Use job type as context suffix" UNCHECKED**. This is what makes one
      context cover PR jobs, branch jobs and queue-ref jobs — see the section
      below.
-   - Do **not** add *Filter by name (with wildcards)*. It filters **all** SCM
-     heads, not just branches: PRs are heads named `PR-<n>`, so an include list
-     of `main gh-readonly-queue/main/**` silently hides every pull request
-     (observed here as *Pull Requests (0)* with an open PR). Queue-ref discovery
-     needs no filter at all.
+   - **Add → Filter by name (with wildcards)**, *Include*:
+     ```
+     gh-readonly-queue/main/** PR-*
+     ```
+     This excludes **`main`**, and that is the point. The queue fast-forwards
+     `main` to the queue head verbatim, so the merged SHA *is* both a queue head
+     and `main` — a `main` branch job then rebuilds the commit the queue already
+     validated and **rewrites the same required context on it**, minutes later.
+     Measured on `0380065`: queue job `success` 09:25:38, then `main/19` pending,
+     pending, `success` 09:27:28. For that window the validated SHA reads
+     `pending`, and a flaky `main` build would mark it red permanently. The
+     `main` build is pure duplication — the queue tested that exact commit
+     object.
+
+     ⚠️ **`PR-*` is load-bearing.** This trait filters *all* SCM heads, not just
+     branches, and PRs are heads named `PR-<n>`. An earlier attempt used
+     `main gh-readonly-queue/main/**` and silently hid every pull request
+     (*Pull Requests (0)* with an open PR), which looked like the trait being
+     unusable. After saving, confirm the Pull Requests tab is non-empty before
+     trusting anything else. If it is empty, use *Filter by name (with regular
+     expression)* with `^(?!main$).*$` instead.
 
 4. **Build Configuration**: *by Jenkinsfile*, Script Path `Jenkinsfile`.
 
@@ -136,10 +152,18 @@ as PRs* in step 3.
   gh api -X PUT repos/The-OpenROAD-Project/ci-testing/collaborators/openroad-ci \
     -f permission=push
   ```
-- **A wildcard name filter hides pull requests.** The job showed
-  *Pull Requests (0)* with an open PR, because the filter applies to all SCM
-  heads and PRs are heads named `PR-<n>`. Removing the filter fixed it.
-- **One context, two writers.** With *All branches*, PR #5's head got
+- **A wildcard name filter hides pull requests unless `PR-*` is included.** The
+  job showed *Pull Requests (0)* with an open PR, because the filter applies to
+  all SCM heads and PRs are heads named `PR-<n>`. Removing the filter fixed it at
+  the time, and that was the wrong lesson: the filter is needed to exclude
+  `main` (see step 3), the include list just has to name `PR-*` too.
+- **One context, two writers — form 2, `main` == queue head.** Fires on *every*
+  merge, not just PR heads, and was missed for a full day because the first form
+  looked like the whole bug. Fixed by excluding `main` in the name filter; the
+  Actions half was fixed by dropping `push: [main]` from `ci.yml`.
+  **Generalised rule for the production repos: a branch or push build must never
+  write a context the merge queue requires.**
+- **One context, two writers — form 1, PR head.** With *All branches*, PR #5's head got
   `Public CI=error` from job `PR-5` (18:11:14) and `Public CI=success` from job
   `mq-test/bravo` (18:11:38). Both were individually correct — the PR job builds
   merged-with-target (3 items, fails), the branch job builds the branch alone
