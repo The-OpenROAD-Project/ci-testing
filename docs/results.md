@@ -230,14 +230,54 @@ one file, enqueued back to back.
   180, and that override leaked onto `main` twice (see scenario 2). A wrong
   inference here became a config bug three hours later.
 
-### 5. Jenkins gating / timeout — _pending_
+### 5. Jenkins unavailable — queue stalls, then evicts — **PASS** (2026-08-06)
 
-Required checks include `jenkins/ci`; disable the Jenkins job (or the webhook)
-and enqueue a PR.
-Expected: the queue waits, then evicts at `check_response_timeout_minutes` (15).
+PR #25 `lima`. Both required checks green on the PR head **first**, then the
+Jenkins job disabled, *then* enqueued — so the entry was created with no Jenkins
+in existence to build it.
 
-- Observed wait:
-- Queue message:
+```
+added_to_merge_queue      11:44:37
+removed_from_merge_queue  12:00:40      (no `merged` event)
+queue head d85747b: ci=success, mq-debug=success, Public CI = ABSENT
+PR #25 afterwards: OPEN, mergeStateStatus=CLEAN
+```
+
+- **Observed timeout: 16m03s** against `check_response_timeout_minutes: 15`. The
+  extra ~1 minute matches the queue-tick latency measured in scenario 3 — the
+  configured value is a floor, not a deadline.
+- **A missing required check does not fail fast.** Actions finished in ~1 min and
+  was green; the entry then sat for another 15 minutes on a context that was
+  never going to arrive. GitHub cannot distinguish "provider is down" from
+  "provider is slow".
+- **The PR looks fine afterwards.** `mergeStateStatus=CLEAN`, both head checks
+  green, no red anywhere — the author sees a healthy PR that silently did not
+  merge. The only evidence is `removed_from_merge_queue` with no `merged`, in the
+  timeline. Anyone monitoring PR state rather than queue events would miss this
+  entirely.
+- **Blast radius is the whole queue, not one PR.** The doomed entry occupies the
+  queue for the full timeout, and everything behind it waits. With a 15-minute
+  timeout and a provider that is down rather than flaky, throughput collapses to
+  four merges/hour until someone notices and drops the requirement. That is the
+  argument for keeping this timeout well under the "someone notices" time, not
+  for making it generous.
+
+**Two findings from the first, failed attempt (PR #24) — both worth keeping:**
+
+1. **Disabling a Multibranch Pipeline does not abort in-flight builds.** The
+   first attempt disabled Jenkins *after* `added_to_merge_queue`. Jenkins had
+   already picked up the queue ref 33s later, and that build ran to completion
+   and posted `Public CI=success` at 11:20:58 — the entry merged normally at
+   11:21:06. Disabling a job is not an emergency stop for work already
+   dispatched.
+2. **The enqueue → Jenkins pickup window is ~33s**, so "disable it after you see
+   the enqueue" is not a reliable way to starve an entry. Because required checks
+   are evaluated on the **PR head**, the correct order is: get the head green,
+   disable, *then* enqueue.
+
+Not tested: whether a status stuck at `pending` (rather than absent) times out
+identically. #24 suggests the stuck-pending path resolves whenever the build was
+already dispatched, but a build that hangs forever was not exercised.
 
 ### 6. Jenkins discovery + status posting — **PARTIAL** (2026-08-05)
 
@@ -538,7 +578,79 @@ depends on exactly one job writing it per commit.
 
 ## Recommendation for the production repos
 
-_TBD — scenario 5 (Jenkins timeout) is the last one outstanding._
+All eight scenarios are complete. Summary of what a merge queue would buy and
+cost OpenROAD, and what must be configured first.
+
+### Does it work with our Jenkins? Yes, with three mandatory settings
+
+1. **One status context, unsuffixed** — *Custom Github Notification Context*
+   with the job-type suffix **off**, so PR jobs, branch jobs and
+   `gh-readonly-queue/*` jobs all post the same name. The plugin's default
+   per-job-type contexts (`.../pr-merge`, `.../branch`) **cannot** gate a merge
+   queue: GitHub applies one required-checks list to both PR merges and merge
+   groups, so requiring either name deadlocks the other side.
+2. **Exactly one job may write that context per commit.** Two aliasing paths
+   both violate this and both were observed here:
+   - a PR head built as *both* a branch and a PR → fix with *Discover branches:
+     Exclude branches that are also filed as PRs*;
+   - the merged SHA is simultaneously a queue head **and** `main`, because the
+     queue fast-forwards → fix by excluding `main` from discovery (name filter
+     include `gh-readonly-queue/main/** PR-*`) and dropping `push: [main]` from
+     the Actions workflow.
+   Generalised: **a branch or push build must never write a context the merge
+   queue requires.**
+3. **The CI identity needs write access on the repo** (commit statuses). A
+   public repo lets Jenkins clone with no credential, so this fails *only* on the
+   write, and the plugin fails silently — green builds, no statuses.
+
+Also required, and cheap: an orphaned-item discard policy. Every queue entry
+leaves a dead branch job behind (28 jobs after ~20 entries here).
+
+### What it costs
+
+| | per PR |
+|---|---|
+| Actions runs | 2 (`pull_request` + `merge_group`) |
+| Jenkins builds | 2 (PR job + queue job) |
+| **total** | **4** — was 6 before the duplicate-writer fixes |
+
+Speculation adds more: an entry behind a failure is rebuilt (scenario 3, juliet
+built twice). Budget roughly *2× steady state, plus one extra build per PR behind
+each failure*.
+
+### What it buys
+
+- **Catches semantic conflicts that PR CI structurally cannot** (scenario 4):
+  two PRs, each green alone, red when combined, no textual conflict for git to
+  find. This is the entire value proposition and it reproduces reliably.
+- **~2.75× throughput vs serialized merging** at three concurrent PRs
+  (4m38s vs ~12m45s measured, scenario 2), because entries build speculatively
+  on top of each other rather than one at a time.
+- **What lands is byte-identical to what was validated** — 16/16 merged PRs,
+  `main` fast-forwarded to the exact queue head.
+
+### The risks, in order
+
+1. **A required-check provider that is down blocks the entire queue**, not just
+   one PR, for `check_response_timeout_minutes` per entry (scenario 5: 16m03s
+   observed at a 15-minute setting). At OpenROAD volume that is a merge freeze.
+   Keep the timeout short and have a documented "drop the requirement" runbook.
+2. **Silent failure is the dominant failure mode.** A green Jenkins build that
+   posted no status, and an evicted PR that still reads `CLEAN`, both occurred
+   here. Any rollout needs a post-build read-back asserting the context actually
+   landed, and monitoring on `removed_from_merge_queue` **without** a following
+   `merged`.
+3. **Cost scales with queue-build duration.** Everything above was measured with
+   a 60–180s check. An OpenROAD queue build is closer to an hour, so a
+   5-deep speculative queue is 5 concurrent hour-long builds, and one failure
+   rebuilds everything behind it.
+
+### Suggested rollout order
+
+Start with **one** repo and **Actions-only** required checks to prove the queue
+mechanics, then add the Jenkins context once a read-back check is in place. Do
+not enable it on a repo where anyone expects to push to the default branch
+directly — the ruleset blocks admins too.
 
 **Measured cost per PR**, corrected — the earlier "built twice" was wrong:
 
