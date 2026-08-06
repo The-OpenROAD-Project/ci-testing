@@ -10,10 +10,17 @@ Fill in as scenarios run. Dates absolute.
   `DevOps/ci-testing-Public`, context **`Public CI`** (plugin trait, unsuffixed —
   route B; route A rejected, see scenario 6).
 - Ruleset id: `20469423`, `enforcement=active`. Required checks: `ci` alone for
-  scenarios 1 and 4; **`ci` + `Public CI`** from 2026-08-05 18:46 onward, so both
-  CI systems gate the queue.
-- `MAX_ITEMS` raised 2 → 8 after scenario 4, otherwise every later item PR fails
-  on count and the batching/eviction runs are unreadable.
+  scenarios 1 and 4; **`ci` + `Public CI`** from somewhere in
+  **(18:33:38Z, 18:49:16Z]** onward, so both CI systems gate the queue. The
+  ruleset API exposes only the latest `updated_at`, so the change cannot be
+  timestamped exactly; the bracket comes from PR #7 merging 3s *before* its
+  `Public CI` posted (so not yet required) and PR #8 merging 15s *after* its
+  did. An earlier revision said "18:46", which was a `-03:00` local stamp
+  mis-transcribed as UTC.
+- `MAX_ITEMS` path: 2 → 8 (PR #8, deliberate) → **4 (PR #11, an accidental
+  lowering that reverted #8)** → 12 (PR #13). Currently 12 with 9 items.
+  Keep it above the item count or every item PR fails merged-with-target for
+  reasons unrelated to the scenario under test.
 
 Confirmed on 2026-08-05: merge queue **is** available on a `team`-plan org for a
 public repo. The plan restriction is about private repos only.
@@ -51,7 +58,10 @@ because the ruleset had already blocked the direct push that change needed.
   cannot offer.
 - **Actions:** both `merge_group` workflows ran on the queue ref — `CI` (`ci`,
   required) and `MQ debug` (observability). The `pull_request` run of `ci` was
-  separate, so this PR consumed two `ci` runs total.
+  separate. **Three `ci` runs, not two:** `pull_request` 17:47:32,
+  `merge_group` 17:49:01, and `push` to main 17:50:53 — the workflow also fired
+  on `push: [main]` at the time. That third run was removed in PR #21; see the
+  duplicate-writer finding in scenario 6.
 - **Jenkins:** not configured yet — n/a for this run.
 - **Timeline:** `auto_merge_enabled` 17:48:04 → `added_to_merge_queue` 17:48:40
   → `removed_from_merge_queue` 17:50:48 → `merged` 17:50:49 →
@@ -147,8 +157,15 @@ ci         pass   3m3s
 
 …yet it never merged. Timeline: `added_to_merge_queue` 02:56:39 →
 `removed_from_merge_queue` **03:00:51**, no `merged` event. **Eviction latency
-4m12s**, i.e. the 180s check plus queue overhead — the queue does not wait for
-anything else once a required check reports failure.
+4m12s**, of which the check itself was 3m17s (02:56:48 → 03:00:05).
+
+**Eviction is not immediate on failure — it happens on the queue's next tick.**
+india's `ci` concluded 03:00:05 and `Public CI` errored 03:00:21, but removal
+came at 03:00:51: **30–46s later**, in the same second PR #18 merged. Juliet's
+first entry is the sharper case — it went red at 02:59:56, 55s before anything
+moved. Budget for that lag when sizing `check_response_timeout_minutes`; a
+failing entry occupies the queue for most of a minute after its verdict is
+already public.
 
 **The rebuild is the finding.** Queue heads recorded by `watch-queue.sh`:
 
@@ -159,11 +176,19 @@ anything else once a required check reports failure.
 | `pr-20-88c9660` | pr-19's head | hotel + india + juliet |
 | **`pr-20-6d3f547`** | **pr-18's head** | **hotel + juliet — india dropped** |
 
-Juliet's first entry was speculative on top of india. When india failed, that
-entry was discarded and juliet was **re-entered 7 seconds later** (03:00:58)
-against hotel alone, then merged as `b23f79d`. So a mid-queue failure costs the
-PRs behind it a rebuild, not a rejection — they are never blamed for a neighbour's
-breakage, and `main` never sees india's tree.
+Juliet's first entry was speculative on top of india, and **went red itself**
+(`ci` FAILURE + `Public CI` error on `282360a`) because it inherited india's
+`QUEUE_ONLY_FAIL=1` — that red is the mechanism that triggers the rebuild, not a
+mark against juliet. When india failed, that entry was discarded and juliet's
+was **rebuilt in place within ~3s** (the new entry's Actions run was created
+03:00:54). Note juliet was *not* re-enqueued: its timeline has a single
+`added_to_merge_queue` at 02:56:43 and no second one — the PR never left the
+queue. An earlier revision said "re-entered 7 seconds later (03:00:58)", which
+was `watch-queue.sh`'s poll timestamp, not the ref's birth; do not source
+timings from `.mq-queue-log`. The rebuilt entry was based on hotel alone, then
+merged as `b23f79d`. So a mid-queue failure costs the PRs behind it a rebuild,
+not a rejection — nothing red ever landed on PR #20's own head, and `main` never
+saw india's tree.
 
 **Cost note for production sizing:** juliet was built twice — once speculatively
 with india, once without. That is the price of speculation, and it scales with
@@ -220,17 +245,30 @@ The synthetic probe turned out to be unnecessary: the real queue runs already
 answered the discovery question. Job `DevOps/ci-testing-Public`.
 
 **Works — the big unknown is settled:** Jenkins discovered and built **every**
-`gh-readonly-queue/main/pr-N-<base>` ref with no special configuration —
-`pr-2`, `pr-3`, `pr-4` green, `pr-5` red (correctly failing the 3-item count, so
-`ci/check.sh` genuinely ran on the queue tree). Indexing kept up with refs that
-exist for ~2 minutes.
+`gh-readonly-queue/main/pr-N-<base>` ref with no special configuration.
+Independently verifiable for pr-9, 11, 14, 15, 16, 18, 19 and both pr-20 entries
+via `Public CI` statuses whose `target_url` points at the queue-ref job.
+Indexing kept up with refs that exist for ~2 minutes.
+
+*Unverifiable, recorded from the Jenkins UI at the time and not re-checkable —
+the instance is not publicly reachable:* the specific "pr-2, pr-3, pr-4 green,
+pr-5 red" reading (no statuses were posted then), the count of five orphaned
+jobs, and the build-#6 console text quoted below. The build-#6 **outcome** is
+verifiable and is the stronger citation: `Public CI = error` on `248f2e3` from
+`job/main/6` at 18:09:22.
 
 **Broken — no commit status reached GitHub.** All four queue SHAs and PR #5's
-head report `total_count: 0` statuses. Root cause:
+head reported `total_count: 0` statuses **as observed at ~18:0x, before the
+permission fix** — both SHAs have statuses now, from later builds, so the claim
+is only true with that timestamp attached. Root cause:
 
-- `openroad-ci` (the identity behind the `github-token` credential) has **admin
-  on `OpenROAD` but is not a collaborator on `ci-testing`**, and `ci-testing` has
-  no teams attached at all.
+- `openroad-ci` **was not a collaborator on `ci-testing`**, and `ci-testing` has
+  no teams attached at all. (Its access level on `OpenROAD` cannot be confirmed
+  from here — `orgs/.../memberships/openroad-ci` needs `admin:org` and returns
+  403; it is a plain org member. An earlier revision asserted "admin on
+  OpenROAD" without evidence.) Note this identity backs the *plugin*; the
+  `github-token` credential used by the old pipeline route is a different,
+  fine-grained PAT — which is why granting `openroad-ci` push did not fix it.
 - The repo is public, so Jenkins could *clone* without credentials; only the
   *write* (statuses API) failed.
 - The original `postStatus` used `curl -sS` with no status-code check, so a
@@ -282,6 +320,29 @@ earlier, so GitHub displayed **green** for a PR whose merge-with-target build ha
 failed. Cause: *Discover branches: All branches* builds a PR head as a branch
 *and* as a PR, and with the suffix disabled both write the same context name.
 Fix: *Exclude branches that are also filed as PRs*.
+
+**That fix was incomplete — the same defect has a second form, and it fires on
+every merge.** Because the queue fast-forwards `main` to the queue head verbatim,
+the merged SHA *is* both a queue head and `main`. Both CI systems then build it
+again and rewrite the same required context. Measured on `0380065` (PR #21):
+
+| time | writer | state |
+|---|---|---|
+| 09:25:38 | queue job `gh-readonly-queue/main/pr-21-b23f79d` | **success** ← the queue's verdict |
+| 09:26:03 | Jenkins `main/19` | pending |
+| 09:26:18 | Jenkins `main/19` | pending |
+| 09:27:28 | Jenkins `main/19` | success |
+
+For ~2 minutes after every merge, the validated SHA reads `pending`; if a `main`
+build ever fails or flakes, a SHA the queue passed reads red permanently. The
+Actions half was the same (`ci` ran on both `merge_group` and `push`) and was
+removed in PR #21 by dropping `push: [main]` from `ci.yml`. **The Jenkins half is
+still live** and needs `main` excluded from that job's branch discovery — it is
+pure duplication, since the queue validated that exact commit.
+
+Generalised for the production repos: *a branch or push build must never write a
+context that the merge queue requires.* Under an unsuffixed shared context that
+means the default branch itself must not be built by the same job.
 
 Under a merge queue the consequence is bounded but real — such a PR enters the
 queue on a false green, and the queue entry catches it, so `main` stays safe.
@@ -379,7 +440,8 @@ treat per-branch overrides as temporary only for PRs that get closed, not merged
 
 ### 8. What a merge-commit queue lands — **PASS** (2026-08-05, PR #9)
 
-`scripts/verify-merge.sh 9`, all three assertions green:
+`scripts/verify-merge.sh 9`, all three assertions green (SHAs abbreviated here;
+the real output prints 40-char SHAs and a `queue head :` line before the NOTE):
 
 ```
   PR head      : 337c1ac
@@ -387,9 +449,16 @@ treat per-branch overrides as temporary only for PRs that get closed, not merged
   parents      : 2 (65aa7bf 337c1ac)
   PASS  merge commit has 2 parents
   PASS  second parent is the PR head
+  queue head   : 38de906
   NOTE  main fast-forwarded to the queue head itself
   PASS  landed tree == validated tree
 ```
+
+⚠️ **The third assertion is vacuous as written.** `verify-merge.sh` compares
+`queue_sha^{tree}` against `merge_sha^{tree}`, and those have been the *same
+commit* in every run to date — it compares a tree to itself. It can only fail if
+`main` stops fast-forwarding to the queue head, which has never happened here.
+Treat "landed tree == validated tree" as untested, not as evidence.
 
 - **The queue builds the merge commit itself**, inside the queue branch, before
   any check runs. The queue head `38de906` is titled *"Merge pull request #9
@@ -397,8 +466,12 @@ treat per-branch overrides as temporary only for PRs that get closed, not merged
   that same position held a single-parent commit. So CI validates the exact
   commit object that will land, not merely an equivalent tree.
 - **`main` fast-forwards to the queue head verbatim** — the same property as the
-  squash era, so it is a merge-queue invariant rather than a merge-method
-  artefact. `merge commit == queue head == what CI tested`.
+  squash era. Observed on **16/16** merged PRs (#2 through #20) across both merge
+  methods: every `merge_group` run's `headSha` equals the PR's `mergeCommit.oid`.
+  Two caveats: two merge methods on one repo is not proof of a product
+  invariant, and for co-merged batches the head becomes an *ancestor* rather
+  than a tip — when #14 and #15 merged together, `192ec44` was never a `main`
+  tip; the single push event was to `407b5d6`. Byte-identical either way.
 - History shape is a normal merge bubble per entry:
   ```
   *   38de906 65aa7bf 337c1ac  Merge pull request #9 from ...
@@ -409,10 +482,11 @@ treat per-branch overrides as temporary only for PRs that get closed, not merged
   ```
 - **Replicated on PR #12** (`golf`): merge commit `79f934c`, parents
   `f026c73` (`main`) + `3cfbcdc` (PR head), `main` again fast-forwarded to the
-  queue head, tree identical. Three for three, so the shape is stable rather than
-  a one-off.
-- Speculative stacking with `max_entries_to_build: 5` is still unobserved — needs
-  scenario 2 (three overlapping PRs).
+  queue head, tree identical. **16/16 across every merged PR**, so the shape is
+  stable rather than a one-off.
+- Speculative stacking has since been observed in scenarios 2, 3 and 4, but never
+  deeper than **3** entries. `max_entries_to_build: 5` remains untested at its
+  limit — five overlapping PRs would be needed.
 
 **Both CI systems confirmed testing the merged tree**, from the `ci/check.sh`
 parent block:
@@ -446,8 +520,16 @@ behaviour by inspecting what lands, never by expecting the CLI to refuse.
 | Credential | `github-token` (fine-grained PAT, insufficient) | `openroad-ci` (classic, already works) |
 | Covers PR + branch + queue refs | by construction | **verified** — same name on all three |
 | Blast radius | this repo only | every repo the folder scans (use a standalone job) |
-| Extra failure surface | pipeline code, `jq`, token scope | none beyond the plugin |
-| **Verdict** | **rejected** | **adopted** |
+| Extra failure surface | pipeline code, `jq`, token scope | plugin only — **but silent**: see below |
+| **Verdict** | **rejected** | **adopted, with a caveat** |
+
+The "extra failure surface" row understates route B. Scenario 6 was diagnosed in
+minutes precisely *because* route A's pipeline printed its own HTTP 403. With
+posting delegated to the plugin, a rejected POST leaves a green build and no
+status — the failure mode this very document calls "worse than a red build" —
+and nothing in the pipeline can detect it. If route B goes to the production
+repos, add a non-gating post-build read-back
+(`gh api repos/$R/commits/$SHA/status`) so a missing context fails loudly.
 
 Route B wins outright here. Route A's only advantage — no server-side config —
 does not survive contact with an agent image that lacks `jq` and a credential
@@ -456,8 +538,25 @@ depends on exactly one job writing it per commit.
 
 ## Recommendation for the production repos
 
-_TBD — write after scenarios 1-6 and the A/B comparison._
+_TBD — scenario 5 (Jenkins timeout) is the last one outstanding._
 
-Open cost question to answer here: under a merge queue every PR is built twice
-(PR job + queue entry), and speculative entries multiply that further. Quantify
-against OpenROAD/ORFS CI durations before proposing the change.
+**Measured cost per PR**, corrected — the earlier "built twice" was wrong:
+
+| | before PR #21 | now | achievable |
+|---|---|---|---|
+| Actions `ci` runs | 3 (`pull_request`, `merge_group`, `push`) | 2 | 2 |
+| Jenkins builds | 3 (PR job, queue job, `main` job) | 3 | 2 |
+| **total** | **6** | **5** | **4** |
+
+The `push`/`main` builds are pure duplication: the queue validated that exact
+commit object. Dropping `push: [main]` removed one; excluding `main` from the
+Jenkins job removes the other. Speculation multiplies the queue-side number
+further — scenario 3 shows an entry behind a failure gets rebuilt, so juliet was
+built twice for one merge.
+
+**Measured speedup:** three PRs merged in 4m38s vs ~12m45s serialized
+(**~2.75×**), derived from a measured lone-entry cycle of ~4m15s, not from an
+additive model — see scenario 2 for why the additive model is wrong.
+
+Before proposing this for OpenROAD, weigh those against per-build cost there,
+where a queue build is an hour rather than three minutes.
