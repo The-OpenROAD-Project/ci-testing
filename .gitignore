@@ -2,3 +2,5 @@
 # after an entry merges, so they have to be recorded locally for
 # scripts/verify-merge.sh to compare against afterwards.
 .mq-queue-log
+.mq-watch.pid
+ci/config.env.tmp

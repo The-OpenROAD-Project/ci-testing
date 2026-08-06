@@ -67,6 +67,26 @@ Watch any of them with:
 scripts/watch-queue.sh        # queue refs, per-SHA contexts, PR auto-merge state
 ```
 
+## Teardown — required, not optional
+
+Every scenario needs these two steps. Skipping them is what caused all the
+self-inflicted damage in `docs/results.md`:
+
+```bash
+scripts/watch-queue.sh stop                    # or it polls gh for hours
+gh pr close <n> --comment 'scenario fixture'   # for every PR carrying an override
+```
+
+**Close override PRs; never merge them.** Under a merge queue enqueueing *is*
+merging, so there is no "queue it but don't land it" — a scenario PR that carries
+a `ci/config.env` override makes that override the repo default the moment it
+goes green. `scripts/queue-prs.sh` now skips such PRs unless you name them
+explicitly, but closing them is the actual discipline.
+
+Do **not** put `watch-queue.sh` at the end of a chained command block: it is the
+last element, so the block never returns and the watcher is never reaped. Run it
+in its own shell, or accept the 45-minute budget it now self-imposes.
+
 `watch-queue.sh` also records every queue head it sees to `.mq-queue-log`
 (gitignored) and fetches the objects, because GitHub deletes those refs seconds
 after an entry merges — without that, scenario 8's tree comparison is impossible.

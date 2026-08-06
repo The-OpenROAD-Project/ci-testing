@@ -57,10 +57,25 @@ check "merge commit has 2 parents" "2" "$nparents"
 check "second parent is the PR head" "$head_sha" "$p2"
 
 # Which queue entry validated this PR? Ref names are gh-readonly-queue/<base>/pr-<n>-<base-sha>.
-queue_sha="$(grep -E "/pr-${pr}-" "$QUEUE_LOG" 2>/dev/null | tail -1 | cut -d' ' -f1 || true)"
+# A missing comparison is a FAILED verification, never a pass. This check is the
+# whole reason the script exists ("landed tree == validated tree"); if it cannot
+# run, exiting 0 would report success having verified nothing — the same
+# silent-green shape the Jenkinsfile was fixed for in scenario 6.
+# A PR can have MORE THAN ONE queue entry: a speculative entry is discarded and
+# rebuilt when something ahead of it fails (scenario 3 produced two for pr-20).
+# `tail -1` would pick whichever the watcher happened to log last — ordered by
+# ls-remote's lexicographic ref names, not by which one merged — and comparing
+# against a discarded entry reports FAIL on the repo's headline claim. Prefer
+# the entry whose head IS the merge commit; fall back only if none matches.
+queue_sha="$(awk -v p="/pr-${pr}-" -v m="$merge_sha" '$2 ~ p && $1 == m {print $1}' "$QUEUE_LOG" 2>/dev/null | tail -1 || true)"
 if [ -z "$queue_sha" ]; then
-  note "  SKIP  tree comparison: no queue head for pr-${pr} in ${QUEUE_LOG}"
+  queue_sha="$(awk -v p="/pr-${pr}-" '$2 ~ p {print $1}' "$QUEUE_LOG" 2>/dev/null | tail -1 || true)"
+  [ -z "$queue_sha" ] || note "  NOTE  no logged entry matches the merge commit; using last-seen entry"
+fi
+if [ -z "$queue_sha" ]; then
+  note "  FAIL  tree comparison NOT PERFORMED: no queue head for pr-${pr} in ${QUEUE_LOG}"
   note "        (run scripts/watch-queue.sh during the queue run to capture it)"
+  fail=1
 else
   note "  queue head   : $queue_sha"
   if git cat-file -e "${queue_sha}^{commit}" 2>/dev/null; then
@@ -73,7 +88,10 @@ else
     check "landed tree == validated tree" \
       "$(git rev-parse "${queue_sha}^{tree}")" "$(git rev-parse "${merge_sha}^{tree}")"
   else
-    note "  SKIP  tree comparison: object ${queue_sha} not present locally"
+    note "  FAIL  tree comparison NOT PERFORMED: object ${queue_sha} was pruned"
+    note "        (queue heads are unreachable objects; watch-queue.sh now pins"
+    note "         them under refs/mq-queue/* so gc cannot collect them)"
+    fail=1
   fi
 fi
 

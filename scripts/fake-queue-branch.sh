@@ -19,10 +19,15 @@ cd "$(dirname "$0")/.."
 base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || echo main)"
 
 if [ "${1:-}" = "--clean" ]; then
-  git ls-remote origin 'refs/heads/gh-readonly-queue/*' 'refs/heads/mq-sim/*' \
+  # Scope to the probe namespace ONLY. `*` in an ls-remote pattern matches across
+  # '/', so 'refs/heads/gh-readonly-queue/*' matches every REAL queue entry —
+  # running --clean during a scenario would delete live merge-queue refs
+  # mid-validation. Never widen these globs. No `|| true`: a refused delete must
+  # be visible, not swallowed.
+  git ls-remote origin 'refs/heads/gh-readonly-queue/*/pr-999-*' 'refs/heads/mq-sim/*' \
     | awk '{print $2}' | while read -r ref; do
         echo "deleting ${ref}"
-        git push origin --delete "${ref#refs/heads/}" || true
+        git push origin --delete "${ref#refs/heads/}"
       done
   exit 0
 fi
