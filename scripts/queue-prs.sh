@@ -32,7 +32,22 @@ if [ "${#prs[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# Under a merge queue, enqueue and merge are the SAME action: --auto is the
+# enqueue path, and a green entry merges. So a PR carrying a ci/config.env
+# override cannot be "queued but not merged" — enqueueing it is deciding to make
+# its override the repo default. That is how MAX_ITEMS=4 (reverting a deliberate
+# 8) and SLEEP_SECONDS=180 (twice) reached main. Overrides are skipped unless
+# named explicitly on the command line.
+explicit=$#
 for pr in "${prs[@]}"; do
+  # Ask GitHub what the PR touches rather than diffing local refs, which may not
+  # be fetched and go stale after a force-push.
+  if [ "$explicit" -eq 0 ] && \
+     gh pr view "$pr" --json files -q '.files[].path' | grep -qx 'ci/config.env'; then
+    echo "== SKIP #${pr}: changes ci/config.env — merging it would change the repo default."
+    echo "   Close it when the scenario ends, or pass the number explicitly to force."
+    continue
+  fi
   echo "== enqueue #${pr}"
   gh pr merge "$pr" --merge --auto
 done

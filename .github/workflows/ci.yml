@@ -3,11 +3,16 @@ name: CI
 # `merge_group` is mandatory. Without it, a check required by the merge queue
 # never runs for a queue entry and the queue stalls until
 # check_response_timeout_minutes expires.
+# No `push: [main]`. The queue fast-forwards main to the queue head verbatim, so
+# a push build re-runs on a SHA the merge_group run already validated — and
+# rewrites the same required `ci` context on it, several minutes later. Observed
+# on b23f79d: the queue's success at 03:04:37 was replaced by a pending, then a
+# second success at 03:08:39. That is the "one context, two writers" defect from
+# scenario 6 in a second form, and it happens on every merge. It also inflated
+# the per-PR cost by a third.
 on:
   pull_request:
   merge_group:
-  push:
-    branches: [main]
 
 # Collapse redundant PR runs, but never cancel a merge_group run: a cancelled
 # required check reads as a failure to the queue and evicts the PR.
@@ -19,7 +24,11 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Must stay BELOW the ruleset's check_response_timeout_minutes (15), or a
+    # slow run gets evicted by the queue while Actions is still going and the
+    # eviction is recorded as a check failure — which would confound scenario 5,
+    # whose entire purpose is measuring that timeout.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:

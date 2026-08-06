@@ -24,6 +24,26 @@ SLEEP_SECONDS="${_env_sleep:-${SLEEP_SECONDS:-60}}"
 FORCE_FAIL="${_env_force:-${FORCE_FAIL:-0}}"
 QUEUE_ONLY_FAIL="${_env_qonly:-${QUEUE_ONLY_FAIL:-0}}"
 
+# Validate the knobs before anything uses them. `[ "$n" -gt "$m" ]` returns 2 on
+# a non-integer operand, and `if` treats 2 as false — so a stray character
+# (CRLF checkout, a typo, a sed-mangled value) SILENTLY SKIPS the item-count
+# gate and the script prints PASS. Same for the sleep. `set -e` does not help:
+# it is explicitly exempt inside an `if` condition. Fail loudly instead.
+case "${MAX_ITEMS}${SLEEP_SECONDS}" in
+  ''|*[!0-9]*)
+    echo "FATAL: non-integer knob (MAX_ITEMS='${MAX_ITEMS}' SLEEP_SECONDS='${SLEEP_SECONDS}')" >&2
+    echo "       refusing to run: a bad value would skip the gate and report PASS" >&2
+    exit 2 ;;
+esac
+for _b in "FORCE_FAIL=$FORCE_FAIL" "QUEUE_ONLY_FAIL=$QUEUE_ONLY_FAIL"; do
+  case "${_b#*=}" in
+    0|1) ;;
+    *) echo "FATAL: ${_b%%=*} must be 0 or 1, got '${_b#*=}'" >&2
+       echo "       (FORCE_FAIL=true would run entirely green and read as 'no eviction')" >&2
+       exit 2 ;;
+  esac
+done
+
 # --- context detection -------------------------------------------------------
 # Actions sets GITHUB_*; Jenkins multibranch sets BRANCH_NAME / GIT_COMMIT.
 event="${GITHUB_EVENT_NAME:-}"
@@ -52,10 +72,19 @@ esac
 # Jenkins PR job uses "merging the PR with the current target branch revision"),
 # so a PR run must show 2 parents. One parent on a PR run would mean the branch
 # is being tested in isolation and the queue gate is worthless.
-parents="$(git rev-list --parents -1 HEAD 2>/dev/null | cut -d' ' -f2- || echo '')"
+# `cut -s` so a parentless line yields empty instead of echoing HEAD back as if
+# it were its own parent (root commit, or a shallow graft).
+parents="$(git rev-list --parents -1 HEAD 2>/dev/null | cut -s -d' ' -f2- || echo '')"
 nparents="$(printf '%s' "$parents" | wc -w | tr -d ' ')"
 merge_build=no
 [ "$nparents" -ge 2 ] && merge_build=yes
+# A shallow clone truncates HEAD's parents, so a genuine merge commit reports
+# one parent. Report "unknown", not "no": "no" asserts the CI is testing the
+# branch in isolation, and a false alarm there invites someone to "fix" the PR
+# discovery strategy and destroy the real gate.
+if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+  merge_build=unknown
+fi
 
 echo "=============================================="
 echo " ci/check.sh"

@@ -78,9 +78,10 @@ each queue ref is the *previous entry's head*, not `main`:
 | `pr-15-192ec44…` | `192ec44` | **pr-14's queue head** |
 | `pr-16-407b5d6…` | `407b5d6` | **pr-15's queue head** |
 
-So entry 3 was validated against a tree containing PRs 1 and 2 — the queue did
-not serialize and re-base one at a time, which is what scenario 4 saw when the
-PRs were too far apart in time to overlap.
+So entry 3 was validated against a tree containing PRs 1 and 2. Note this is not
+special to `SLEEP_SECONDS=180`: scenario 4 speculated at 60s too (that entry's
+claim to the contrary has been retracted). The long check made the stacking
+*easy to observe*, nothing more.
 
 **Timings** (all three enqueued within 32s):
 
@@ -91,9 +92,14 @@ PRs were too far apart in time to overlap.
 | #16 | 22:41:55 | 22:46:01 | 4m06s |
 
 #14 and #15 merged in the **same second** — the queue merged a batch, not a
-sequence. Three PRs landed in 4m38s wall-clock against a 180s check; serialized
-they would have taken roughly 3 × (180s + 2min wait) ≈ 15 min. That ratio is the
-argument for speculation on a busy repo.
+sequence. Three PRs landed in **4m38s** wall-clock against a 180s check.
+
+Serialized comparison, measured rather than modelled: a lone entry with a 180s
+check took **~4m15s** end to end (juliet's second entry, born ~03:00:52, merged
+03:05:08), so three of them ≈ **12m45s** → **~2.75× speedup**. Do *not* model it
+as `3 × (check + min_entries_to_merge_wait_minutes)`: scenario 1 shows a 60s
+check plus a 2-minute wait producing 2m09s total, i.e. the wait overlaps the
+check rather than adding to it.
 
 **Resulting history** is a clean first-parent spine of merge commits, each PR's
 own commit hanging off it:
@@ -126,15 +132,49 @@ by having `mk-pr.sh` print the pre-override values and a restore reminder;
 the real rule is **close scenario PRs rather than merging them** when they carry
 overrides.
 
-### 3. Mid-queue eviction — _pending_
+### 3. Mid-queue eviction — **PASS** (2026-08-06, merge-commit era)
 
-PR2 with `QUEUE_ONLY_FAIL=1`; enqueue PR1, PR2, PR3.
-Expected: PR2 green as a PR, red in the queue, evicted; PR1 merges; PR3 rebuilt
-on a fresh entry without PR2.
+PRs #18 `hotel`, #19 `india` (`QUEUE_ONLY_FAIL=1`), #20 `juliet`, all at
+`SLEEP_SECONDS=180`, enqueued together.
 
-- PR2 PR-level result / queue result:
-- Did PR3 get a new queue branch:
-- Eviction latency:
+**India was green as a PR and red only in the queue** — exactly the split
+`QUEUE_ONLY_FAIL` exists to create:
+
+```
+Public CI  pass   .../job/PR-19/1/
+ci         pass   3m3s
+```
+
+…yet it never merged. Timeline: `added_to_merge_queue` 02:56:39 →
+`removed_from_merge_queue` **03:00:51**, no `merged` event. **Eviction latency
+4m12s**, i.e. the 180s check plus queue overhead — the queue does not wait for
+anything else once a required check reports failure.
+
+**The rebuild is the finding.** Queue heads recorded by `watch-queue.sh`:
+
+| entry | base | contains |
+|---|---|---|
+| `pr-18-14e500a` | `main` | hotel |
+| `pr-19-6d3f547` | pr-18's head | hotel + india |
+| `pr-20-88c9660` | pr-19's head | hotel + india + juliet |
+| **`pr-20-6d3f547`** | **pr-18's head** | **hotel + juliet — india dropped** |
+
+Juliet's first entry was speculative on top of india. When india failed, that
+entry was discarded and juliet was **re-entered 7 seconds later** (03:00:58)
+against hotel alone, then merged as `b23f79d`. So a mid-queue failure costs the
+PRs behind it a rebuild, not a rejection — they are never blamed for a neighbour's
+breakage, and `main` never sees india's tree.
+
+**Cost note for production sizing:** juliet was built twice — once speculatively
+with india, once without. That is the price of speculation, and it scales with
+how often entries fail. On a repo where a queue build costs an hour rather than
+three minutes, `max_entries_to_build: 5` means up to five concurrent builds and a
+re-run of everything behind any failure.
+
+**Keep #19 open or close it — do not merge it.** Its branch carries
+`QUEUE_ONLY_FAIL=1`; merging would make queue-only failure the repo default and
+break every subsequent queue entry. Same class of leak as scenario 2's
+`SLEEP_SECONDS`.
 
 ### 4. Semantic conflict — **PASS** (2026-08-05, squash-era)
 
@@ -150,13 +190,20 @@ one file, enqueued back to back.
 - **Would PR-level CI have caught it? No.** Git saw no conflict either — the two
   PRs touch different files. Only the queue caught it. This is the value prop,
   demonstrated end to end.
-- Aftermath, worth knowing: `bravo` is now permanently unmergeable (`main` is at
-  the 2-item limit), so its author has to rebase and deal with it. The queue
-  converts a latent broken-`main` into a stuck PR — which is the trade.
-- Note these two did **not** co-batch: `pr-5`'s entry was based on `main` *after*
-  `alpha` merged, i.e. the queue serialized them rather than speculating. With
-  `min_entries_to_merge: 1` and a 60s check, `alpha` merged before `bravo` was
-  enqueued. Scenario 2 needs `SLEEP_SECONDS=180` to force real overlap.
+- Aftermath: `bravo` was unmergeable *until the limit moved* — `MAX_ITEMS` went
+  to 8 at 18:51 the same evening, and it was simply closed at 22:37. The queue
+  converts a latent broken-`main` into a stuck PR, which is the trade; "stuck"
+  lasts only as long as the constraint does.
+- **These two DID co-batch** — an earlier version of this entry claimed the
+  opposite and it was wrong, with consequences. `bravo` was
+  `added_to_merge_queue` at **17:57:19**, its entry was built at 17:57:37, and
+  `alpha` merged at **17:59:02** — so bravo was enqueued 1m43s *before* alpha
+  landed, and `ab47802` in its ref name is alpha's **queue head**, not "main
+  after alpha merged". Speculation was already happening at `SLEEP_SECONDS=60`.
+- The retracted claim caused real damage: it produced the conclusion "scenario 2
+  needs `SLEEP_SECONDS=180` to force real overlap", scenario 2 was then run at
+  180, and that override leaked onto `main` twice (see scenario 2). A wrong
+  inference here became a config bug three hours later.
 
 ### 5. Jenkins gating / timeout — _pending_
 
